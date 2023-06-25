@@ -15,7 +15,9 @@ source:
 build:
   run_exports:
     # They seem to be using calver, so their version numbers are not very informative
-    - {{ pin_subpackage('spirv-tools', 'x.x.x') }}
+    # But we expect these to be rather stable
+    # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
+    - {{ pin_subpackage('spirv-tools', 'x') }}
   number: 3
 
 requirements:
