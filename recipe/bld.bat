@@ -2,8 +2,9 @@ mkdir build
 if %ERRORLEVEL% neq 0 exit 1
 cd build
 
-cmake %CMAKE_ARGS% \
+cmake %CMAKE_ARGS% ^
   -GNinja ^
+  -DSPIRV-Headers_SOURCE_DIR=%LIBRARY_PREFIX% ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_INSTALL_PREFIX=%LIBRARY_PREFIX% ^
   ..
