@@ -1,16 +1,16 @@
 {% set version = "2023.2" %}
+# Keep this in synch with https://github.com/KhronosGroup/SPIRV-Tools/blob/v2023.2/DEPS#L14
+{% set headers_version = "1.3.243.0" %}
 
 package:
   name: spirv-tools
   version: {{ version }}
 
 source:
-  - url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.tar.gz
-    sha256: 7416cc8a98a10c32bacc36a39930b0c5b2a484963df5d68f388ed7ffee1faad3
-
-  - url: https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/sdk-1.3.243.0.tar.gz
-    sha256: 16927b1868e7891377d059cd549484e4158912439cf77451ae7e01e2a3bcd28b
-    folder: external/spirv-headers
+  url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.tar.gz
+  sha256: 7416cc8a98a10c32bacc36a39930b0c5b2a484963df5d68f388ed7ffee1faad3
+  patches:
+    - 0001-Get-package-version-and-description-from-conda-build.patch
 
 build:
   run_exports:
@@ -18,7 +18,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 3
+  number: 4
 
 requirements:
   build:
@@ -26,7 +26,9 @@ requirements:
     - cmake
     - make    # [unix]
     - ninja   # [win]
+    - python
   host:
+    - spirv-headers {{ headers_version }}
   run:
 
 test:
