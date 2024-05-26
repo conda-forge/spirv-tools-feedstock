@@ -2,6 +2,10 @@ set -ex
 mkdir build
 cd build
 
+if [[ "${target_platform}" == osx-* ]]; then
+  CMAKE_ARGS="${CMAKE_ARGS} -D_LIBCPP_DISABLE_AVAILABILITY"
+fi
+
 cmake ${CMAKE_ARGS} \
   -DCMAKE_BUILD_TYPE=Release \
   -DSPIRV_TOOLS_LIBRARY_TYPE=SHARED \
