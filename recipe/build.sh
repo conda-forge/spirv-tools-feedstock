@@ -2,8 +2,8 @@ set -ex
 mkdir build
 cd build
 
-if [[ "${target_platform}" == osx-* ]]; then
-  CMAKE_ARGS="${CMAKE_ARGS} -D_LIBCPP_DISABLE_AVAILABILITY"
+if [[ "${target_platform}" == osx-64 ]]; then
+  CXXFLAGS="${CXXFLAGS} -D_LIBCPP_DISABLE_AVAILABILITY"
 fi
 
 cmake ${CMAKE_ARGS} \
