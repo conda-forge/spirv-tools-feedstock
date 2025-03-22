@@ -200,7 +200,5 @@ Feedstock Maintainers
 * [@ZzEeKkAa](https://github.com/ZzEeKkAa/)
 * [@hmaarrfk](https://github.com/hmaarrfk/)
 * [@isuruf](https://github.com/isuruf/)
-
-
-<!-- dummy commit to enable rerendering -->
+* [@oleksandr-pavlyk](https://github.com/oleksandr-pavlyk/)
 
