@@ -30,7 +30,7 @@ requirements:
     - python
   host:
     - spirv-headers {{ headers_version }}
-  run_constratined:
+  run_constrained:
     - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
 
 test:
