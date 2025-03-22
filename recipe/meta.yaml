@@ -18,7 +18,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 0
+  number: 1
 
 requirements:
   build:
@@ -30,7 +30,8 @@ requirements:
     - python
   host:
     - spirv-headers {{ headers_version }}
-  run:
+  run_constratined:
+    - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
 
 test:
   commands:
