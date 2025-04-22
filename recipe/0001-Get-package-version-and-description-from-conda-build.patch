@@ -1,7 +1,7 @@
-From f9d58a058023f5a0ff74dd62b3e5cc0b8329283f Mon Sep 17 00:00:00 2001
+From cc57316e5bbf95d555551762531ce2e24978d303 Mon Sep 17 00:00:00 2001
 From: Mark Harfouche <mark.harfouche@gmail.com>
 Date: Tue, 22 Apr 2025 15:57:34 -0400
-Subject: [PATCH] [PATCH] Get package version and description from conda build
+Subject: [PATCH] Get package version and description from conda build
 
 ---
  utils/update_build_version.py | 8 ++------
