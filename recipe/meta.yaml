@@ -1,6 +1,6 @@
 {% set version = "2025.1" %}
 # Keep this in synch with https://github.com/KhronosGroup/SPIRV-Tools/blob/v2023.2/DEPS#L14
-{% set headers_version = "1.3.290.0" %}
+{% set headers_version = "1.4.309.0" %}
 
 package:
   name: spirv-tools
@@ -30,7 +30,8 @@ requirements:
     - python
   host:
     - spirv-headers {{ headers_version }}
-  run:
+  run_constrained:
+    - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
 
 test:
   commands:
