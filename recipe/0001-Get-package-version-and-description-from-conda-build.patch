@@ -1,6 +1,6 @@
-From af623efe51a425cd00fd57306920216a68cdad05 Mon Sep 17 00:00:00 2001
+From cc57316e5bbf95d555551762531ce2e24978d303 Mon Sep 17 00:00:00 2001
 From: Mark Harfouche <mark.harfouche@gmail.com>
-Date: Sun, 15 Oct 2023 23:23:43 -0400
+Date: Tue, 22 Apr 2025 15:57:34 -0400
 Subject: [PATCH] Get package version and description from conda build
 
 ---
@@ -8,10 +8,10 @@ Subject: [PATCH] Get package version and description from conda build
  1 file changed, 2 insertions(+), 6 deletions(-)
 
 diff --git a/utils/update_build_version.py b/utils/update_build_version.py
-index 5a78ada2..b85a21ae 100755
+index 9115cab1..2aa3d957 100755
 --- a/utils/update_build_version.py
 +++ b/utils/update_build_version.py
-@@ -143,13 +143,9 @@ def main():
+@@ -145,13 +145,9 @@ def main():
      changes_file_path = os.path.realpath(sys.argv[1])
      output_file_path = sys.argv[2]
  
@@ -23,10 +23,10 @@ index 5a78ada2..b85a21ae 100755
 +    description = os.environ.get('PKG_VERSION', 'unknown') + ", " + os.environ.get('PKG_BUILDNUM', 'unkown')
  
 -    repo_path = os.path.dirname(changes_file_path)
--    description = describe(repo_path)
+-    description = os.getenv("FORCED_BUILD_VERSION_DESCRIPTION", describe(repo_path))
      content = OUTPUT_FORMAT.format(version_tag=version, description=description)
  
      # Escape file content.
 -- 
-2.34.1
+2.43.0
 
