@@ -1,6 +1,6 @@
 {% set version = "2025.4" %}
 # Keep this in synch with https://github.com/KhronosGroup/SPIRV-Tools/blob/v2023.2/DEPS#L14
-{% set headers_version = "1.4.309.0" %}
+{% set headers_version = "1.4.321.0" %}
 
 package:
   name: spirv-tools
