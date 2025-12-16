@@ -1,4 +1,4 @@
-{% set version = "2025.4" %}
+{% set version = "2025.5" %}
 # Keep this in synch with https://github.com/KhronosGroup/SPIRV-Tools/blob/v2023.2/DEPS#L14
 {% set headers_version = "1.4.328.0" %}
 
@@ -8,7 +8,7 @@ package:
 
 source:
   url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: d256aa82de849bdce4b05060081dadcc9145c2173a056e8531f649f8975e582e
+  sha256: 23769a70967e91f16f1bf8a58665b643fc4e765d734e85c51faa7d990f01a64f
   patches:
     - 0001-Get-package-version-and-description-from-conda-build.patch
 
