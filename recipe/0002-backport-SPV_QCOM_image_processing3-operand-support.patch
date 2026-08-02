@@ -1,0 +1,58 @@
+Backport of the source hunks of upstream commit
+https://github.com/KhronosGroup/SPIRV-Tools/commit/7fa1f024cf86890b2f9ac2aab19d0583cea59277
+("assembler, disassembler support fo SPV_QCOM_image_processing3 (#6776)",
+DEPS and test hunks dropped).
+
+SPIRV-Headers vulkan-sdk-1.4.357.0 adds the GatherModes operand kind
+(SPV_QCOM_image_processing3), so the grammar-table generator emits
+SPV_OPERAND_TYPE_GATHER_MODES, which v2026.2 does not declare, breaking
+compilation of the generated core_tables_body.inc.  Verified with
+v2026.2's ggt.py against the 1.4.357.0 grammar that this is the only
+operand type used by generated code but not declared.
+
+diff --git a/include/spirv-tools/libspirv.h b/include/spirv-tools/libspirv.h
+--- a/include/spirv-tools/libspirv.h
++++ b/include/spirv-tools/libspirv.h
+@@ -337,6 +337,9 @@ typedef enum spv_operand_type_t {
+   SPV_OPERAND_TYPE_OPTIONAL_CAPABILITY,
+   SPV_OPERAND_TYPE_VARIABLE_CAPABILITY,
+
++  // SPV_QCOM_image_processing3
++  SPV_OPERAND_TYPE_GATHER_MODES,
++
+   // This is a sentinel value, and does not represent an operand type.
+   // It should come last.
+   SPV_OPERAND_TYPE_NUM_OPERAND_TYPES,
+diff --git a/source/binary.cpp b/source/binary.cpp
+--- a/source/binary.cpp
++++ b/source/binary.cpp
+@@ -744,7 +744,8 @@ spv_result_t Parser::parseOperand(size_t inst_offset,
+     case SPV_OPERAND_TYPE_HOST_ACCESS_QUALIFIER:
+     case SPV_OPERAND_TYPE_LOAD_CACHE_CONTROL:
+     case SPV_OPERAND_TYPE_STORE_CACHE_CONTROL:
+-    case SPV_OPERAND_TYPE_NAMED_MAXIMUM_NUMBER_OF_REGISTERS: {
++    case SPV_OPERAND_TYPE_NAMED_MAXIMUM_NUMBER_OF_REGISTERS:
++    case SPV_OPERAND_TYPE_GATHER_MODES: {
+       // A single word that is a plain enum value.
+
+       // Map an optional operand type to its corresponding concrete type.
+diff --git a/source/operand.cpp b/source/operand.cpp
+--- a/source/operand.cpp
++++ b/source/operand.cpp
+@@ -225,6 +225,8 @@ const char* spvOperandTypeStr(spv_operand_type_t type) {
+       return "NonSemantic.Shader.DebugInfo.100 debug operation";
+     case SPV_OPERAND_TYPE_SHDEBUG100_DEBUG_TYPE_QUALIFIER:
+       return "NonSemantic.Shader.DebugInfo.100 debug type qualifier";
++    case SPV_OPERAND_TYPE_GATHER_MODES:
++      return "gather modes";
+
+     case SPV_OPERAND_TYPE_NONE:
+       return "NONE";
+@@ -347,6 +349,7 @@ bool spvOperandIsConcrete(spv_operand_type_t type) {
+     case SPV_OPERAND_TYPE_SHDEBUG100_DEBUG_INFO_FLAGS:
+     case SPV_OPERAND_TYPE_SHDEBUG100_DEBUG_OPERATION:
+     case SPV_OPERAND_TYPE_SHDEBUG100_DEBUG_TYPE_QUALIFIER:
++    case SPV_OPERAND_TYPE_GATHER_MODES:
+       return true;
+     default:
+       break;

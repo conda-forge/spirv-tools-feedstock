@@ -1,0 +1,25 @@
+SPIRV-Headers vulkan-sdk-1.4.357.0 adds five FPEncoding enumerants
+(SPV_EXT_ocp_microscaling_types).  v2026.2's exhaustive switch in
+spvFPEncodingFromOperandFPEncoding does not cover them, which trips
+-Werror=switch (the only warning in the entire build).  Map them to the
+existing fall-through result, SPV_FP_ENCODING_UNKNOWN: v2026.2 has no
+spv_fp_encoding_t values for these types.  Superseded upstream by the
+full SPV_EXT_ocp_microscaling_types support in
+https://github.com/KhronosGroup/SPIRV-Tools/commit/f80351511e5d7ec41f04003bafcc63d8bd8b0209
+(first in v2026.3) - drop this patch on the next version bump.
+
+diff --git a/source/operand.cpp b/source/operand.cpp
+--- a/source/operand.cpp
++++ b/source/operand.cpp
+@@ -650,6 +650,11 @@ spv_fp_encoding_t spvFPEncodingFromOperandFPEncoding(spv::FPEncoding encoding) {
+       return SPV_FP_ENCODING_FLOAT8_E4M3;
+     case spv::FPEncoding::Float8E5M2EXT:
+       return SPV_FP_ENCODING_FLOAT8_E5M2;
++    case spv::FPEncoding::Float6E2M3EXT:
++    case spv::FPEncoding::Float6E3M2EXT:
++    case spv::FPEncoding::Float4E2M1EXT:
++    case spv::FPEncoding::Float8UnsignedE8M0EXT:
++    case spv::FPEncoding::MXInt8EXT:
+     case spv::FPEncoding::Max:
+       break;
+   }
