@@ -178,6 +178,7 @@ Feedstock Maintainers
 
 * [@JarrettSJohnson](https://github.com/JarrettSJohnson/)
 * [@ZzEeKkAa](https://github.com/ZzEeKkAa/)
+* [@baszalmstra](https://github.com/baszalmstra/)
 * [@hmaarrfk](https://github.com/hmaarrfk/)
 * [@isuruf](https://github.com/isuruf/)
 * [@oleksandr-pavlyk](https://github.com/oleksandr-pavlyk/)
