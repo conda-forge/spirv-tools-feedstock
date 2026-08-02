@@ -31,7 +31,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 2
+  number: 3
 
 requirements:
   build:
@@ -47,8 +47,20 @@ requirements:
     - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
 
 test:
+  requires:
+    - {{ compiler('cxx') }}
+    - {{ stdlib('c') }}
+    - cmake
+    - ninja
+  files:
+    - test/CMakeLists.txt
+    - test/main.cpp
   commands:
     - spirv-as -h
+    - cmake -G Ninja -S test -B test-build
+    - cmake --build test-build
+    - ./test-build/test-spirv-tools  # [unix]
+    - test-build\\test-spirv-tools.exe  # [win]
 
 about:
   home: https://github.com/KhronosGroup/SPIRV-Tools
