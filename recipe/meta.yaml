@@ -1,4 +1,4 @@
-{% set version = "2026.2" %}
+{% set version = "2026.3" %}
 # v2026.2's DEPS pins headers at vulkan-sdk-1.4.350.1, but we intentionally build
 # against the newer vulkan-sdk-1.4.357.0 headers (the DEPS pin of the SPIRV-Tools
 # vulkan-sdk-1.4.357.0 tag, which contains v2026.2): the run_constrained below pins
@@ -11,8 +11,8 @@ package:
   version: "{{ version }}"
 
 source:
-  url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: b4390652e64ab188eede9d556cf183b3c1c4be44d4fcd104b0d4af3bea2712d1
+  url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.zip
+  sha256: 914a3399b08864a211df6839f8f0b2f35e4bce8c738b6714651b6399f7f9e4d8
   patches:
     - 0001-Get-package-version-and-description-from-conda-build.patch
     # SPIRV-Headers 1.4.357.0's grammar adds the GatherModes operand kind
@@ -31,7 +31,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 3
+  number: 0
 
 requirements:
   build:
