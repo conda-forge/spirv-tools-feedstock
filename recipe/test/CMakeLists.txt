@@ -14,3 +14,10 @@ endif()
 
 add_executable(test-spirv-tools main.cpp)
 target_link_libraries(test-spirv-tools PRIVATE SPIRV-Tools SPIRV-Tools-opt)
+
+find_path(SPIRV_TOOLS_PRIVATE_INCLUDE_DIR source/opt/build_module.h
+  PATH_SUFFIXES spirv-tools-private REQUIRED)
+add_executable(test-spirv-tools-private private_headers.cpp)
+target_compile_features(test-spirv-tools-private PRIVATE cxx_std_17)
+target_include_directories(test-spirv-tools-private PRIVATE ${SPIRV_TOOLS_PRIVATE_INCLUDE_DIR})
+target_link_libraries(test-spirv-tools-private PRIVATE SPIRV-Tools-opt)

@@ -18,7 +18,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 1
+  number: 2
 
 requirements:
   build:
@@ -36,18 +36,25 @@ requirements:
 test:
   requires:
     - {{ compiler('cxx') }}
+    # The private headers include the SPIR-V headers
+    - spirv-headers {{ headers_version }}
     - {{ stdlib('c') }}
     - cmake
     - ninja
   files:
     - test/CMakeLists.txt
     - test/main.cpp
+    - test/private_headers.cpp
   commands:
     - spirv-as -h
+    - test -f ${PREFIX}/include/spirv-tools-private/source/opt/build_module.h  # [unix]
+    - if not exist %LIBRARY_INC%\spirv-tools-private\source\opt\build_module.h exit 1  # [win]
     - cmake -G Ninja -S test -B test-build
     - cmake --build test-build
     - ./test-build/test-spirv-tools  # [unix]
     - test-build\\test-spirv-tools.exe  # [win]
+    - ./test-build/test-spirv-tools-private  # [unix]
+    - test-build\\test-spirv-tools-private.exe  # [win]
 
 about:
   home: https://github.com/KhronosGroup/SPIRV-Tools
