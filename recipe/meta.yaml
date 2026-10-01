@@ -51,7 +51,9 @@ test:
     - spirv-opt --strip-debug compute.spv -o stripped.spv
     - spirv-opt -O compute.spv -o optimized.spv
     - spirv-val optimized.spv
-    - cmake -G Ninja -S test -B test-build
+    # MSVC single-config generators default to a Debug build, whose debug C++
+    # runtime and STL layouts are not ABI compatible with the Release DLLs.
+    - cmake -G Ninja -S test -B test-build -DCMAKE_BUILD_TYPE=Release
     - cmake --build test-build
     - ./test-build/test-spirv-tools  # [unix]
     - test-build\\test-spirv-tools.exe  # [win]
