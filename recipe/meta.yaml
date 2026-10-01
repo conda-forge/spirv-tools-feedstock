@@ -11,6 +11,10 @@ source:
   sha256: c2399673510cfaa515e9197db18c2ae5860925f497ad8735c93f00f931c41cbd
   patches:
     - 0001-Get-package-version-and-description-from-conda-build.patch
+    # Export the C++ API with dllexport/dllimport instead of
+    # CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS. Not upstream yet, see
+    # https://github.com/KhronosGroup/SPIRV-Tools/issues/3909
+    - 0002-Export-the-CXX-API-of-the-shared-libraries.patch
 
 build:
   run_exports:
@@ -18,7 +22,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 0
+  number: 1
 
 requirements:
   build:
