@@ -42,8 +42,15 @@ test:
   files:
     - test/CMakeLists.txt
     - test/main.cpp
+    - test/compute.spvasm
   commands:
     - spirv-as -h
+    # Run the optimizer through the command line tools
+    - spirv-as test/compute.spvasm -o compute.spv
+    - spirv-val compute.spv
+    - spirv-opt --strip-debug compute.spv -o stripped.spv
+    - spirv-opt -O compute.spv -o optimized.spv
+    - spirv-val optimized.spv
     - cmake -G Ninja -S test -B test-build
     - cmake --build test-build
     - ./test-build/test-spirv-tools  # [unix]
