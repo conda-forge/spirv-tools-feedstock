@@ -1,4 +1,4 @@
-{% set version = "2026.3" %}
+{% set version = "2026.4" %}
 # The SPIRV-Headers revision pinned by v{{ version }}'s DEPS.
 {% set headers_version = "1.4.357.0" %}
 
@@ -8,7 +8,7 @@ package:
 
 source:
   url: https://github.com/KhronosGroup/SPIRV-Tools/archive/refs/tags/v{{ version }}.zip
-  sha256: 914a3399b08864a211df6839f8f0b2f35e4bce8c738b6714651b6399f7f9e4d8
+  sha256: c2399673510cfaa515e9197db18c2ae5860925f497ad8735c93f00f931c41cbd
   patches:
     - 0001-Get-package-version-and-description-from-conda-build.patch
 
@@ -18,7 +18,7 @@ build:
     # But we expect these to be rather stable
     # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
     - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 1
+  number: 0
 
 requirements:
   build:
