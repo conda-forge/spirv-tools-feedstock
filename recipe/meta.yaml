@@ -3,7 +3,7 @@
 {% set headers_version = "1.4.363.0" %}
 
 package:
-  name: spirv-tools
+  name: spirv-tools-split
   version: "{{ version }}"
 
 source:
@@ -17,12 +17,7 @@ source:
     - 0002-Export-the-CXX-API-of-the-shared-libraries.patch
 
 build:
-  run_exports:
-    # They seem to be using calver, so their version numbers are not very informative
-    # But we expect these to be rather stable
-    # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
-    - {{ pin_subpackage('spirv-tools', 'x') }}
-  number: 1
+  number: 2
 
 requirements:
   build:
@@ -31,36 +26,87 @@ requirements:
     - cmake
     - make    # [unix]
     - ninja   # [win]
-    - python
+    - python >=3
   host:
     - spirv-headers {{ headers_version }}
-  run_constrained:
-    - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
 
-test:
-  requires:
-    - {{ compiler('cxx') }}
-    - {{ stdlib('c') }}
-    - cmake
-    - ninja
-  files:
-    - test/CMakeLists.txt
-    - test/main.cpp
-    - test/compute.spvasm
-  commands:
-    - spirv-as -h
-    # Run the optimizer through the command line tools
-    - spirv-as test/compute.spvasm -o compute.spv
-    - spirv-val compute.spv
-    - spirv-opt --strip-debug compute.spv -o stripped.spv
-    - spirv-opt -O compute.spv -o optimized.spv
-    - spirv-val optimized.spv
-    # MSVC single-config generators default to a Debug build, whose debug C++
-    # runtime and STL layouts are not ABI compatible with the Release DLLs.
-    - cmake -G Ninja -S test -B test-build -DCMAKE_BUILD_TYPE=Release
-    - cmake --build test-build
-    - ./test-build/test-spirv-tools  # [unix]
-    - test-build\\test-spirv-tools.exe  # [win]
+outputs:
+  - name: spirv-tools
+    script: install.sh   # [unix]
+    script: install.bat  # [win]
+    build:
+      run_exports:
+        # They seem to be using calver, so their version numbers are not very informative
+        # But we expect these to be rather stable
+        # so lets try 'x' https://github.com/conda-forge/spirv-tools-feedstock/issues/3
+        - {{ pin_subpackage('spirv-tools', 'x') }}
+    requirements:
+      build:
+        - {{ compiler('cxx') }}
+        - {{ stdlib('c') }}
+        - cmake
+      host:
+        - spirv-headers {{ headers_version }}
+      run_constrained:
+        - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
+    test:
+      requires:
+        - {{ compiler('cxx') }}
+        - {{ stdlib('c') }}
+        - cmake
+        - ninja
+      files:
+        - test/CMakeLists.txt
+        - test/main.cpp
+        - test/compute.spvasm
+      commands:
+        - spirv-as -h
+        # Run the optimizer through the command line tools
+        - spirv-as test/compute.spvasm -o compute.spv
+        - spirv-val compute.spv
+        - spirv-opt --strip-debug compute.spv -o stripped.spv
+        - spirv-opt -O compute.spv -o optimized.spv
+        - spirv-val optimized.spv
+        - test ! -e ${PREFIX}/include/spirv-tools-private  # [unix]
+        - if exist %LIBRARY_INC%\spirv-tools-private exit 1  # [win]
+        # MSVC single-config generators default to a Debug build, whose debug C++
+        # runtime and STL layouts are not ABI compatible with the Release DLLs.
+        - cmake -G Ninja -S test -B test-build -DCMAKE_BUILD_TYPE=Release
+        - cmake --build test-build
+        - ./test-build/test-spirv-tools  # [unix]
+        - test-build\\test-spirv-tools.exe  # [win]
+
+  - name: spirv-tools-internal
+    script: install_internal.sh   # [unix]
+    script: install_internal.bat  # [win]
+    build:
+      run_exports:
+        - {{ pin_subpackage('spirv-tools', max_pin='x.x') }}
+    requirements:
+      build:
+        - cmake
+      host:
+        - {{ pin_subpackage('spirv-tools', exact=True) }}
+        - spirv-headers {{ headers_version }}
+      run:
+        - {{ pin_subpackage('spirv-tools', exact=True) }}
+        - {{ pin_compatible('spirv-headers', max_pin='x.x.x.x') }}
+    test:
+      requires:
+        - {{ compiler('cxx') }}
+        - {{ stdlib('c') }}
+        - cmake
+        - ninja
+      files:
+        - test-internal/CMakeLists.txt
+        - test-internal/main.cpp
+      commands:
+        - test -f ${PREFIX}/include/spirv-tools-private/source/opt/build_module.h  # [unix]
+        - if not exist %LIBRARY_INC%\spirv-tools-private\source\opt\build_module.h exit 1  # [win]
+        - cmake -G Ninja -S test-internal -B test-build -DCMAKE_BUILD_TYPE=Release
+        - cmake --build test-build
+        - ./test-build/test-spirv-tools-internal  # [unix]
+        - test-build\\test-spirv-tools-internal.exe  # [win]
 
 about:
   home: https://github.com/KhronosGroup/SPIRV-Tools
@@ -69,6 +115,7 @@ about:
   summary: The SPIR-V Tools project provides an API and commands for processing SPIR-V modules.
 
 extra:
+  feedstock-name: spirv-tools
   recipe-maintainers:
     - oleksandr-pavlyk
     - ZzEeKkAa
