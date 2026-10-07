@@ -1,0 +1,2675 @@
+From 80050f24f9a83d6f3388500a77485c9f8af1472f Mon Sep 17 00:00:00 2001
+From: Mark Harfouche <mark.harfouche@gmail.com>
+Date: Wed, 30 Sep 2026 21:37:11 -0400
+Subject: [PATCH] Export the C++ API of the shared libraries explicitly
+
+On Windows, the SHARED build of SPIRV-Tools and the libraries layered on
+top of it (opt, link, lint, reduce, diff) did not export their C++ API,
+so it could only be used with CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, which
+exports everything but never dllimports data, vtables or static members.
+
+Give each library its own export macro in libspirv.h, driven by
+SPIRV_TOOLS_<LIB>_SHAREDLIB (public) and SPIRV_TOOLS_<LIB>_IMPLEMENTATION
+(private) compile definitions that spvtools_export_macros() sets on shared
+library targets, and annotate:
+- the public C++ API (optimizer.hpp, linker.hpp, linter.hpp) and the
+  optimizer C API, which is defined in SPIRV-Tools-opt;
+- the internals of SPIRV-Tools used by the other libraries and tools;
+- the internals of SPIRV-Tools-opt used by the other libraries, tools and
+  by consumers of the spvtools::opt API such as Tint (IRContext, Module,
+  Function, BasicBlock, Instruction, the analyses, types, constants and
+  a few passes).
+
+MSVC defines the implicit copy operations of dllexport'ed classes and
+instantiates every member of their template base classes, so:
+- ConstantManager, PassManager and InstructionDisassembler explicitly
+  delete their copy operations, which cannot compile for their members;
+- the move operations of IntrusiveNodeBase cast `this` to NodeType*, as
+  they would not compile when instantiated.
+---
+ CMakeLists.txt                                |  12 ++
+ include/spirv-tools/libspirv.h                |  75 ++++++--
+ include/spirv-tools/linker.hpp                |   6 +-
+ include/spirv-tools/linter.hpp                |   2 +-
+ include/spirv-tools/optimizer.hpp             | 182 +++++++++---------
+ source/CMakeLists.txt                         |   1 +
+ source/diagnostic.h                           |   6 +-
+ source/diff/CMakeLists.txt                    |   1 +
+ source/diff/diff.h                            |   2 +-
+ source/disassemble.h                          |   8 +-
+ source/ext_inst.h                             |   6 +-
+ source/link/CMakeLists.txt                    |   1 +
+ source/lint/CMakeLists.txt                    |   1 +
+ source/name_mapper.h                          |   4 +-
+ source/opcode.h                               |  68 +++----
+ source/operand.h                              |  26 +--
+ source/opt/CMakeLists.txt                     |   1 +
+ source/opt/basic_block.h                      |   2 +-
+ source/opt/block_merge_util.h                 |   4 +-
+ source/opt/build_module.h                     |   6 +-
+ source/opt/cfg.h                              |   2 +-
+ source/opt/compact_ids_pass.h                 |   2 +-
+ source/opt/const_folding_rules.h              |   2 +-
+ source/opt/constants.h                        |  30 +--
+ source/opt/control_dependence.h               |   4 +-
+ source/opt/dataflow.h                         |   4 +-
+ source/opt/decoration_manager.h               |   2 +-
+ source/opt/def_use_manager.h                  |   2 +-
+ source/opt/dominator_analysis.h               |   6 +-
+ source/opt/dominator_tree.h                   |   2 +-
+ source/opt/feature_manager.h                  |   2 +-
+ source/opt/folding_rules.h                    |   2 +-
+ source/opt/function.h                         |   2 +-
+ source/opt/instruction.h                      |   2 +-
+ source/opt/instruction_list.h                 |   4 +-
+ source/opt/ir_context.h                       |   2 +-
+ source/opt/loop_descriptor.h                  |   4 +-
+ source/opt/module.h                           |   2 +-
+ source/opt/optimizer.cpp                      |  20 +-
+ source/opt/pass.h                             |   2 +-
+ source/opt/pass_manager.h                     |   7 +-
+ source/opt/remove_duplicates_pass.h           |   2 +-
+ .../remove_unused_interface_variables_pass.h  |   2 +-
+ source/opt/resolve_binding_conflicts_pass.h   |   2 +-
+ .../opt/split_combined_image_sampler_pass.h   |   2 +-
+ source/opt/strip_debug_info_pass.h            |   2 +-
+ source/opt/struct_cfg_analysis.h              |   2 +-
+ source/opt/type_manager.h                     |   2 +-
+ source/opt/types.h                            |  50 ++---
+ source/print.h                                |  14 +-
+ source/reduce/CMakeLists.txt                  |   1 +
+ source/reduce/reducer.h                       |   2 +-
+ source/spirv_target_env.h                     |  16 +-
+ source/spirv_validator_options.h              |   2 +-
+ source/table.h                                |   2 +-
+ source/table2.h                               |  28 +--
+ source/util/bit_vector.h                      |   4 +-
+ source/util/ilist_node.h                      |   8 +-
+ source/util/parse_number.h                    |   6 +-
+ source/util/string_utils.h                    |   6 +-
+ source/util/timer.h                           |   8 +-
+ 61 files changed, 386 insertions(+), 294 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b69ec9fb..52275944 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -182,6 +182,18 @@ else(SPIRV_TOOLS_BUILD_STATIC)
+   endif()
+ endif(SPIRV_TOOLS_BUILD_STATIC)
+ 
++# Defines the export macros of a shared library (see libspirv.h):
++# ${PREFIX}_IMPLEMENTATION while building it and ${PREFIX}_SHAREDLIB for it and
++# its consumers, so that its API is dllexport'ed and dllimport'ed on Windows.
++function(spvtools_export_macros TARGET PREFIX)
++  get_target_property(type ${TARGET} TYPE)
++  if (type STREQUAL "SHARED_LIBRARY")
++    target_compile_definitions(${TARGET}
++      PRIVATE ${PREFIX}_IMPLEMENTATION
++      PUBLIC ${PREFIX}_SHAREDLIB)
++  endif()
++endfunction()
++
+ function(spvtools_default_compile_options TARGET)
+   target_compile_options(${TARGET} PRIVATE ${SPIRV_WARNINGS})
+ 
+diff --git a/include/spirv-tools/libspirv.h b/include/spirv-tools/libspirv.h
+index 96abf42e..113fe892 100644
+--- a/include/spirv-tools/libspirv.h
++++ b/include/spirv-tools/libspirv.h
+@@ -48,6 +48,59 @@ extern "C" {
+ #define SPIRV_TOOLS_LOCAL
+ #endif
+ 
++// Export macros for the C++ libraries layered on top of SPIRV-Tools. When
++// SPIRV_TOOLS_LIBRARY_TYPE is SHARED, each of them is a separate shared
++// library (DLL on Windows). The CMake targets define SPIRV_TOOLS_<LIB>_SHAREDLIB
++// publicly and SPIRV_TOOLS_<LIB>_IMPLEMENTATION while building the library, so
++// that consumers get __declspec(dllimport) and the library dllexport.
++#if defined(_WIN32)
++#define SPIRV_TOOLS_DLLEXPORT_ __declspec(dllexport)
++#define SPIRV_TOOLS_DLLIMPORT_ __declspec(dllimport)
++#else
++#define SPIRV_TOOLS_DLLEXPORT_ __attribute__((visibility("default")))
++#define SPIRV_TOOLS_DLLIMPORT_
++#endif
++
++#if !defined(SPIRV_TOOLS_OPT_SHAREDLIB)
++#define SPIRV_TOOLS_OPT_EXPORT
++#elif defined(SPIRV_TOOLS_OPT_IMPLEMENTATION)
++#define SPIRV_TOOLS_OPT_EXPORT SPIRV_TOOLS_DLLEXPORT_
++#else
++#define SPIRV_TOOLS_OPT_EXPORT SPIRV_TOOLS_DLLIMPORT_
++#endif
++
++#if !defined(SPIRV_TOOLS_LINK_SHAREDLIB)
++#define SPIRV_TOOLS_LINK_EXPORT
++#elif defined(SPIRV_TOOLS_LINK_IMPLEMENTATION)
++#define SPIRV_TOOLS_LINK_EXPORT SPIRV_TOOLS_DLLEXPORT_
++#else
++#define SPIRV_TOOLS_LINK_EXPORT SPIRV_TOOLS_DLLIMPORT_
++#endif
++
++#if !defined(SPIRV_TOOLS_LINT_SHAREDLIB)
++#define SPIRV_TOOLS_LINT_EXPORT
++#elif defined(SPIRV_TOOLS_LINT_IMPLEMENTATION)
++#define SPIRV_TOOLS_LINT_EXPORT SPIRV_TOOLS_DLLEXPORT_
++#else
++#define SPIRV_TOOLS_LINT_EXPORT SPIRV_TOOLS_DLLIMPORT_
++#endif
++
++#if !defined(SPIRV_TOOLS_REDUCE_SHAREDLIB)
++#define SPIRV_TOOLS_REDUCE_EXPORT
++#elif defined(SPIRV_TOOLS_REDUCE_IMPLEMENTATION)
++#define SPIRV_TOOLS_REDUCE_EXPORT SPIRV_TOOLS_DLLEXPORT_
++#else
++#define SPIRV_TOOLS_REDUCE_EXPORT SPIRV_TOOLS_DLLIMPORT_
++#endif
++
++#if !defined(SPIRV_TOOLS_DIFF_SHAREDLIB)
++#define SPIRV_TOOLS_DIFF_EXPORT
++#elif defined(SPIRV_TOOLS_DIFF_IMPLEMENTATION)
++#define SPIRV_TOOLS_DIFF_EXPORT SPIRV_TOOLS_DLLEXPORT_
++#else
++#define SPIRV_TOOLS_DIFF_EXPORT SPIRV_TOOLS_DLLIMPORT_
++#endif
++
+ // Helpers
+ 
+ #define SPV_BIT(shift) (1 << (shift))
+@@ -351,7 +404,7 @@ typedef enum spv_operand_type_t {
+ bool spvOperandIsConcrete(spv_operand_type_t type);
+ 
+ // Returns true if the given type is concrete and also a mask.
+-bool spvOperandIsConcreteMask(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT bool spvOperandIsConcreteMask(spv_operand_type_t type);
+ 
+ typedef enum spv_ext_inst_type_t {
+   SPV_EXT_INST_TYPE_NONE = 0,
+@@ -1041,39 +1094,39 @@ typedef void (*spv_message_consumer)(spv_message_level_t, const char*,
+ 
+ // Creates and returns an optimizer object.  This object must be passed to
+ // optimizer APIs below and is valid until passed to spvOptimizerDestroy.
+-SPIRV_TOOLS_EXPORT spv_optimizer_t* spvOptimizerCreate(spv_target_env env);
++SPIRV_TOOLS_OPT_EXPORT spv_optimizer_t* spvOptimizerCreate(spv_target_env env);
+ 
+ // Destroys the given optimizer object.
+-SPIRV_TOOLS_EXPORT void spvOptimizerDestroy(spv_optimizer_t* optimizer);
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerDestroy(spv_optimizer_t* optimizer);
+ 
+ // Sets an spv_message_consumer on an optimizer object.
+-SPIRV_TOOLS_EXPORT void spvOptimizerSetMessageConsumer(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerSetMessageConsumer(
+     spv_optimizer_t* optimizer, spv_message_consumer consumer);
+ 
+ // Registers passes that attempt to legalize the generated code.
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterLegalizationPasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterLegalizationPasses(
+     spv_optimizer_t* optimizer);
+ 
+ // Registers passes that attempt to improve performance of generated code.
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterPerformancePasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterPerformancePasses(
+     spv_optimizer_t* optimizer);
+ 
+ // Registers passes that attempt to improve the size of generated code.
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterSizePasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterSizePasses(
+     spv_optimizer_t* optimizer);
+ 
+ // Registers a pass specified by a flag in an optimizer object.
+-SPIRV_TOOLS_EXPORT bool spvOptimizerRegisterPassFromFlag(
++SPIRV_TOOLS_OPT_EXPORT bool spvOptimizerRegisterPassFromFlag(
+     spv_optimizer_t* optimizer, const char* flag);
+ 
+ // Registers passes specified by length number of flags in an optimizer object.
+ // Passes may remove interface variables that are unused.
+-SPIRV_TOOLS_EXPORT bool spvOptimizerRegisterPassesFromFlags(
++SPIRV_TOOLS_OPT_EXPORT bool spvOptimizerRegisterPassesFromFlags(
+     spv_optimizer_t* optimizer, const char** flags, const size_t flag_count);
+ 
+ // Registers passes specified by length number of flags in an optimizer object.
+ // Passes will not remove interface variables.
+-SPIRV_TOOLS_EXPORT bool
++SPIRV_TOOLS_OPT_EXPORT bool
+ spvOptimizerRegisterPassesFromFlagsWhilePreservingTheInterface(
+     spv_optimizer_t* optimizer, const char** flags, const size_t flag_count);
+ 
+@@ -1093,7 +1146,7 @@ spvOptimizerRegisterPassesFromFlagsWhilePreservingTheInterface(
+ // Vulkan 1.1), then validate for that client API version, to the extent
+ // that it is verifiable from data in the binary itself, or from the
+ // validator options set on the optimizer options.
+-SPIRV_TOOLS_EXPORT spv_result_t spvOptimizerRun(
++SPIRV_TOOLS_OPT_EXPORT spv_result_t spvOptimizerRun(
+     spv_optimizer_t* optimizer, const uint32_t* binary, const size_t word_count,
+     spv_binary* optimized_binary, const spv_optimizer_options options);
+ 
+diff --git a/include/spirv-tools/linker.hpp b/include/spirv-tools/linker.hpp
+index 99527ed6..c463ed75 100644
+--- a/include/spirv-tools/linker.hpp
++++ b/include/spirv-tools/linker.hpp
+@@ -23,7 +23,7 @@
+ 
+ namespace spvtools {
+ 
+-class SPIRV_TOOLS_EXPORT LinkerOptions {
++class SPIRV_TOOLS_LINK_EXPORT LinkerOptions {
+  public:
+   // Returns whether a library or an executable should be produced by the
+   // linking phase.
+@@ -113,11 +113,11 @@ class SPIRV_TOOLS_EXPORT LinkerOptions {
+ // * Some entry points were defined multiple times;
+ // * Some imported symbols did not have an exported counterpart;
+ // * Possibly other reasons.
+-SPIRV_TOOLS_EXPORT spv_result_t
++SPIRV_TOOLS_LINK_EXPORT spv_result_t
+ Link(const Context& context, const std::vector<std::vector<uint32_t>>& binaries,
+      std::vector<uint32_t>* linked_binary,
+      const LinkerOptions& options = LinkerOptions());
+-SPIRV_TOOLS_EXPORT spv_result_t
++SPIRV_TOOLS_LINK_EXPORT spv_result_t
+ Link(const Context& context, const uint32_t* const* binaries,
+      const size_t* binary_sizes, size_t num_binaries,
+      std::vector<uint32_t>* linked_binary,
+diff --git a/include/spirv-tools/linter.hpp b/include/spirv-tools/linter.hpp
+index ccbcf0c1..ea59d9a4 100644
+--- a/include/spirv-tools/linter.hpp
++++ b/include/spirv-tools/linter.hpp
+@@ -24,7 +24,7 @@ namespace spvtools {
+ // provides a method for linting.
+ //
+ // Instances of this class provides basic thread-safety guarantee.
+-class SPIRV_TOOLS_EXPORT Linter {
++class SPIRV_TOOLS_LINT_EXPORT Linter {
+  public:
+   explicit Linter(spv_target_env env);
+ 
+diff --git a/include/spirv-tools/optimizer.hpp b/include/spirv-tools/optimizer.hpp
+index bc69bd05..fa47e703 100644
+--- a/include/spirv-tools/optimizer.hpp
++++ b/include/spirv-tools/optimizer.hpp
+@@ -37,13 +37,13 @@ struct DescriptorSetAndBinding;
+ // provides methods for registering optimization passes and optimizing.
+ //
+ // Instances of this class provides basic thread-safety guarantee.
+-class SPIRV_TOOLS_EXPORT Optimizer {
++class SPIRV_TOOLS_OPT_EXPORT Optimizer {
+  public:
+   // The token for an optimization pass. It is returned via one of the
+   // Create*Pass() standalone functions at the end of this header file and
+   // consumed by the RegisterPass() method. Tokens are one-time objects that
+   // only support move; copying is not allowed.
+-  struct PassToken {
++  struct SPIRV_TOOLS_OPT_EXPORT PassToken {
+     struct SPIRV_TOOLS_LOCAL Impl;  // Opaque struct for holding internal data.
+ 
+     PassToken(std::unique_ptr<Impl>);
+@@ -245,38 +245,38 @@ class SPIRV_TOOLS_EXPORT Optimizer {
+ 
+ // Creates a null pass.
+ // A null pass does nothing to the SPIR-V module to be optimized.
+-Optimizer::PassToken CreateNullPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateNullPass();
+ 
+ // Creates a strip-debug-info pass.
+ // A strip-debug-info pass removes all debug instructions (as documented in
+ // Section 3.42.2 of the SPIR-V spec) of the SPIR-V module to be optimized.
+-Optimizer::PassToken CreateStripDebugInfoPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateStripDebugInfoPass();
+ 
+ // [Deprecated] This will create a strip-nonsemantic-info pass.  See below.
+-Optimizer::PassToken CreateStripReflectInfoPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateStripReflectInfoPass();
+ 
+ // Creates a strip-nonsemantic-info pass.
+ // A strip-nonsemantic-info pass removes all reflections and explicitly
+ // non-semantic instructions.
+-Optimizer::PassToken CreateStripNonSemanticInfoPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateStripNonSemanticInfoPass();
+ 
+ // Creates an eliminate-dead-functions pass.
+ // An eliminate-dead-functions pass will remove all functions that are not in
+ // the call trees rooted at entry points and exported functions.  These
+ // functions are not needed because they will never be called.
+-Optimizer::PassToken CreateEliminateDeadFunctionsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadFunctionsPass();
+ 
+ // Creates an eliminate-dead-members pass.
+ // An eliminate-dead-members pass will remove all unused members of structures.
+ // This will not affect the data layout of the remaining members.
+-Optimizer::PassToken CreateEliminateDeadMembersPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadMembersPass();
+ 
+ // Creates a set-spec-constant-default-value pass from a mapping from spec-ids
+ // to the default values in the form of string.
+ // A set-spec-constant-default-value pass sets the default values for the
+ // spec constants that have SpecId decorations (i.e., those defined by
+ // OpSpecConstant{|True|False} instructions).
+-Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
+     const std::unordered_map<uint32_t, std::string>& id_value_map);
+ 
+ // Creates a set-spec-constant-default-value pass from a mapping from spec-ids
+@@ -284,7 +284,7 @@ Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
+ // A set-spec-constant-default-value pass sets the default values for the
+ // spec constants that have SpecId decorations (i.e., those defined by
+ // OpSpecConstant{|True|False} instructions).
+-Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
+     const std::unordered_map<uint32_t, std::vector<uint32_t>>& id_value_map);
+ 
+ // Creates a flatten-decoration pass.
+@@ -294,7 +294,7 @@ Optimizer::PassToken CreateSetSpecConstantDefaultValuePass(
+ // instructions with equivalent OpDecorate and OpMemberDecorate instructions.
+ // The pass does not attempt to preserve debug information for instructions
+ // it removes.
+-Optimizer::PassToken CreateFlattenDecorationPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateFlattenDecorationPass();
+ 
+ // Creates a freeze-spec-constant-value pass.
+ // A freeze-spec-constant pass specializes the value of spec constants to
+@@ -306,7 +306,7 @@ Optimizer::PassToken CreateFlattenDecorationPass();
+ // pass does not fold the newly added normal constants and does not process
+ // other spec constants defined by OpSpecConstantComposite or
+ // OpSpecConstantOp.
+-Optimizer::PassToken CreateFreezeSpecConstantValuePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateFreezeSpecConstantValuePass();
+ 
+ // Creates a fold-spec-constant-op-and-composite pass.
+ // A fold-spec-constant-op-and-composite pass folds spec constants defined by
+@@ -328,7 +328,7 @@ Optimizer::PassToken CreateFreezeSpecConstantValuePass();
+ //   OpSConvert, OpFConvert, OpQuantizeToF16 and
+ //   all the operations under Kernel capability.
+ // TODO(qining): Add support for the operations listed above.
+-Optimizer::PassToken CreateFoldSpecConstantOpAndCompositePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateFoldSpecConstantOpAndCompositePass();
+ 
+ // Creates a unify-constant pass.
+ // A unify-constant pass de-duplicates the constants. Constants with the exact
+@@ -344,7 +344,7 @@ Optimizer::PassToken CreateFoldSpecConstantOpAndCompositePass();
+ //  constant won't be handled, which means, it won't be used to replace any
+ //  other constants, neither can other constants replace it.
+ //  3) NaN in float point format with different bit patterns are not unified.
+-Optimizer::PassToken CreateUnifyConstantPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateUnifyConstantPass();
+ 
+ // Creates a eliminate-dead-constant pass.
+ // A eliminate-dead-constant pass removes dead constants, including normal
+@@ -352,13 +352,13 @@ Optimizer::PassToken CreateUnifyConstantPass();
+ // OpConstantFalse and spec constants defined by OpSpecConstant,
+ // OpSpecConstantComposite, OpSpecConstantTrue, OpSpecConstantFalse or
+ // OpSpecConstantOp.
+-Optimizer::PassToken CreateEliminateDeadConstantPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadConstantPass();
+ 
+ // Creates a strength-reduction pass.
+ // A strength-reduction pass will look for opportunities to replace an
+ // instruction with an equivalent and less expensive one.  For example,
+ // multiplying by a power of 2 can be replaced by a bit shift.
+-Optimizer::PassToken CreateStrengthReductionPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateStrengthReductionPass();
+ 
+ // Creates a block merge pass.
+ // This pass searches for blocks with a single Branch to a block with no
+@@ -374,7 +374,7 @@ Optimizer::PassToken CreateStrengthReductionPass();
+ //
+ // Presence of phi instructions can inhibit this optimization. Handling
+ // these is left for future improvements.
+-Optimizer::PassToken CreateBlockMergePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateBlockMergePass();
+ 
+ // Creates an exhaustive inline pass.
+ // An exhaustive inline pass attempts to exhaustively inline all function
+@@ -383,7 +383,7 @@ Optimizer::PassToken CreateBlockMergePass();
+ // calls by subsequent optimization passes. As the inlining is exhaustive,
+ // there is no attempt to optimize for size or runtime performance. Functions
+ // that are not in the call tree of an entry point are not changed.
+-Optimizer::PassToken CreateInlineExhaustivePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInlineExhaustivePass();
+ 
+ // Creates an opaque inline pass.
+ // An opaque inline pass inlines all function calls in all functions in all
+@@ -394,7 +394,7 @@ Optimizer::PassToken CreateInlineExhaustivePass();
+ // by subsequent passes in order to remove the storing of opaque types which is
+ // not legal in Vulkan. Functions that are not in the call tree of an entry
+ // point are not changed.
+-Optimizer::PassToken CreateInlineOpaquePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInlineOpaquePass();
+ 
+ // Creates a single-block local variable load/store elimination pass.
+ // For every entry point function, do single block memory optimization of
+@@ -417,7 +417,7 @@ Optimizer::PassToken CreateInlineOpaquePass();
+ // by LocalSingleStoreElim and LocalMultiStoreElim.
+ //
+ // Only functions in the call tree of an entry point are processed.
+-Optimizer::PassToken CreateLocalSingleBlockLoadStoreElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLocalSingleBlockLoadStoreElimPass();
+ 
+ // Create dead branch elimination pass.
+ // For each entry point function, this pass will look for SelectionMerge
+@@ -433,7 +433,7 @@ Optimizer::PassToken CreateLocalSingleBlockLoadStoreElimPass();
+ // This pass is most effective when preceded by passes which eliminate
+ // local loads and stores, effectively propagating constant values where
+ // possible.
+-Optimizer::PassToken CreateDeadBranchElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDeadBranchElimPass();
+ 
+ // Creates an SSA local variable load/store elimination pass.
+ // For every entry point function, eliminate all loads and stores of function
+@@ -450,7 +450,7 @@ Optimizer::PassToken CreateDeadBranchElimPass();
+ // This pass is most effective if preceded by Inlining and
+ // LocalAccessChainConvert. LocalSingleStoreElim and LocalSingleBlockElim
+ // will reduce the work that this pass has to do.
+-Optimizer::PassToken CreateLocalMultiStoreElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLocalMultiStoreElimPass();
+ 
+ // Creates a local access chain conversion pass.
+ // A local access chain conversion pass identifies all function scope
+@@ -467,7 +467,7 @@ Optimizer::PassToken CreateLocalMultiStoreElimPass();
+ // subsequent analysis and elimination of these variables along with their
+ // loads and stores allowing values to propagate to their points of use where
+ // possible.
+-Optimizer::PassToken CreateLocalAccessChainConvertPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLocalAccessChainConvertPass();
+ 
+ // Creates a local single store elimination pass.
+ // For each entry point function, this pass eliminates loads and stores for
+@@ -488,7 +488,7 @@ Optimizer::PassToken CreateLocalAccessChainConvertPass();
+ // This pass will reduce the work needed to be done by LocalSingleBlockElim
+ // and LocalMultiStoreElim and can improve the effectiveness of other passes
+ // such as DeadBranchElimination which depend on values for their analysis.
+-Optimizer::PassToken CreateLocalSingleStoreElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLocalSingleStoreElimPass();
+ 
+ // Creates an insert/extract elimination pass.
+ // This pass processes each entry point function in the module, searching for
+@@ -500,7 +500,7 @@ Optimizer::PassToken CreateLocalSingleStoreElimPass();
+ // Besides removing extracts this pass enables subsequent dead code elimination
+ // passes to delete the inserts. This pass performs best after access chains are
+ // converted to inserts and extracts and local loads and stores are eliminated.
+-Optimizer::PassToken CreateInsertExtractElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInsertExtractElimPass();
+ 
+ // Creates a dead insert elimination pass.
+ // This pass processes each entry point function in the module, searching for
+@@ -515,7 +515,7 @@ Optimizer::PassToken CreateInsertExtractElimPass();
+ // pass can be advantageous on its own, it is also advantageous to execute
+ // this pass after CreateInsertExtractPass() as it will remove any unused
+ // inserts created by that pass.
+-Optimizer::PassToken CreateDeadInsertElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDeadInsertElimPass();
+ 
+ // Create aggressive dead code elimination pass
+ // This pass eliminates unused code from the module. In addition,
+@@ -546,9 +546,9 @@ Optimizer::PassToken CreateDeadInsertElimPass();
+ // If |remove_outputs| is true, allow outputs to be removed from the interface.
+ // This is only safe if the caller knows that there is no corresponding input
+ // variable in the following shader. It is false by default.
+-Optimizer::PassToken CreateAggressiveDCEPass();
+-Optimizer::PassToken CreateAggressiveDCEPass(bool preserve_interface);
+-Optimizer::PassToken CreateAggressiveDCEPass(bool preserve_interface,
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateAggressiveDCEPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateAggressiveDCEPass(bool preserve_interface);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateAggressiveDCEPass(bool preserve_interface,
+                                              bool remove_outputs);
+ 
+ // Creates a remove-unused-interface-variables pass.
+@@ -556,23 +556,23 @@ Optimizer::PassToken CreateAggressiveDCEPass(bool preserve_interface,
+ // referenced in the entry point function or any function in its call tree. Note
+ // that this could cause the shader interface to no longer match other shader
+ // stages.
+-Optimizer::PassToken CreateRemoveUnusedInterfaceVariablesPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRemoveUnusedInterfaceVariablesPass();
+ 
+ // Creates an empty pass.
+ // This is deprecated and will be removed.
+ // TODO(jaebaek): remove this pass after handling glslang's broken unit tests.
+ //                https://github.com/KhronosGroup/glslang/pull/2440
+-Optimizer::PassToken CreatePropagateLineInfoPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreatePropagateLineInfoPass();
+ 
+ // Creates an empty pass.
+ // This is deprecated and will be removed.
+ // TODO(jaebaek): remove this pass after handling glslang's broken unit tests.
+ //                https://github.com/KhronosGroup/glslang/pull/2440
+-Optimizer::PassToken CreateRedundantLineInfoElimPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRedundantLineInfoElimPass();
+ 
+ // Creates a compact ids pass.
+ // The pass remaps result ids to a compact and gapless range starting from %1.
+-Optimizer::PassToken CreateCompactIdsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCompactIdsPass();
+ 
+ // Creates a remove duplicate pass.
+ // This pass removes various duplicates:
+@@ -580,7 +580,7 @@ Optimizer::PassToken CreateCompactIdsPass();
+ // * duplicate extended instruction imports;
+ // * duplicate types;
+ // * duplicate decorations.
+-Optimizer::PassToken CreateRemoveDuplicatesPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRemoveDuplicatesPass();
+ 
+ // Creates a CFG cleanup pass.
+ // This pass removes cruft from the control flow graph of functions that are
+@@ -588,12 +588,12 @@ Optimizer::PassToken CreateRemoveDuplicatesPass();
+ // following functionality:
+ //
+ // - Removal of unreachable basic blocks.
+-Optimizer::PassToken CreateCFGCleanupPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCFGCleanupPass();
+ 
+ // Create dead variable elimination pass.
+ // This pass will delete module scope variables, along with their decorations,
+ // that are not referenced.
+-Optimizer::PassToken CreateDeadVariableEliminationPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDeadVariableEliminationPass();
+ 
+ // create merge return pass.
+ // changes functions that have multiple return statements so they have a single
+@@ -608,28 +608,28 @@ Optimizer::PassToken CreateDeadVariableEliminationPass();
+ //
+ // these conditions are guaranteed to be met after running dead-branch
+ // elimination.
+-Optimizer::PassToken CreateMergeReturnPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateMergeReturnPass();
+ 
+ // Create value numbering pass.
+ // This pass will look for instructions in the same basic block that compute the
+ // same value, and remove the redundant ones.
+-Optimizer::PassToken CreateLocalRedundancyEliminationPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLocalRedundancyEliminationPass();
+ 
+ // Create LICM pass.
+ // This pass will look for invariant instructions inside loops and hoist them to
+ // the loops preheader.
+-Optimizer::PassToken CreateLoopInvariantCodeMotionPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopInvariantCodeMotionPass();
+ 
+ // Creates a loop fission pass.
+ // This pass will split all top level loops whose register pressure exceedes the
+ // given |threshold|.
+-Optimizer::PassToken CreateLoopFissionPass(size_t threshold);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopFissionPass(size_t threshold);
+ 
+ // Creates a loop fusion pass.
+ // This pass will look for adjacent loops that are compatible and legal to be
+ // fused. The fuse all such loops as long as the register usage for the fused
+ // loop stays under the threshold defined by |max_registers_per_loop|.
+-Optimizer::PassToken CreateLoopFusionPass(size_t max_registers_per_loop);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopFusionPass(size_t max_registers_per_loop);
+ 
+ // Creates a loop peeling pass.
+ // This pass will look for conditions inside a loop that are true or false only
+@@ -637,36 +637,36 @@ Optimizer::PassToken CreateLoopFusionPass(size_t max_registers_per_loop);
+ // iterations of the loop will be executed outside of the main loop.
+ // To limit code size explosion, the loop peeling can only happen if the code
+ // size growth for each loop is under |code_growth_threshold|.
+-Optimizer::PassToken CreateLoopPeelingPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopPeelingPass();
+ 
+ // Creates a loop unswitch pass.
+ // This pass will look for loop independent branch conditions and move the
+ // condition out of the loop and version the loop based on the taken branch.
+ // Works best after LICM and local multi store elimination pass.
+-Optimizer::PassToken CreateLoopUnswitchPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopUnswitchPass();
+ 
+ // Creates a pass to legalize multidimensional arrays for Vulkan.
+ // This pass will replace multidimensional arrays of resources with a single
+ // dimensional array. Combine-access-chains should be run before this pass.
+-Optimizer::PassToken CreateLegalizeMultidimArrayPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLegalizeMultidimArrayPass();
+ 
+ // Create global value numbering pass.
+ // This pass will look for instructions where the same value is computed on all
+ // paths leading to the instruction.  Those instructions are deleted.
+-Optimizer::PassToken CreateRedundancyEliminationPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRedundancyEliminationPass();
+ 
+ // Create scalar replacement pass.
+ // This pass replaces composite function scope variables with variables for each
+ // element if those elements are accessed individually.  The parameter is a
+ // limit on the number of members in the composite variable that the pass will
+ // consider replacing.
+-Optimizer::PassToken CreateScalarReplacementPass(uint32_t size_limit = 0);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateScalarReplacementPass(uint32_t size_limit = 0);
+ 
+ // Create a private to local pass.
+ // This pass looks for variables declared in the private storage class that are
+ // used in only one function.  Those variables are moved to the function storage
+ // class in the function that they are used.
+-Optimizer::PassToken CreatePrivateToLocalPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreatePrivateToLocalPass();
+ 
+ // Creates a conditional constant propagation (CCP) pass.
+ // This pass implements the SSA-CCP algorithm in
+@@ -677,24 +677,24 @@ Optimizer::PassToken CreatePrivateToLocalPass();
+ // Constant values in expressions and conditional jumps are folded and
+ // simplified. This may reduce code size by removing never executed jump targets
+ // and computations with constant operands.
+-Optimizer::PassToken CreateCCPPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCCPPass();
+ 
+ // Creates a workaround driver bugs pass.  This pass attempts to work around
+ // a known driver bug (issue #1209) by identifying the bad code sequences and
+ // rewriting them.
+ //
+ // Current workaround: Avoid OpUnreachable instructions in loops.
+-Optimizer::PassToken CreateWorkaround1209Pass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateWorkaround1209Pass();
+ 
+ // Creates a pass that converts if-then-else like assignments into OpSelect.
+-Optimizer::PassToken CreateIfConversionPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateIfConversionPass();
+ 
+ // Creates a pass that will replace instructions that are not valid for the
+ // current shader stage by constants.  Has no effect on non-shader modules.
+-Optimizer::PassToken CreateReplaceInvalidOpcodePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateReplaceInvalidOpcodePass();
+ 
+ // Creates a pass that simplifies instructions using the instruction folder.
+-Optimizer::PassToken CreateSimplificationPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSimplificationPass();
+ 
+ // Create loop unroller pass.
+ // Creates a pass to unroll loops which have the "Unroll" loop control
+@@ -702,14 +702,14 @@ Optimizer::PassToken CreateSimplificationPass();
+ // safely this criteria is checked before doing the unroll by the
+ // LoopUtils::CanPerformUnroll method. Any loop that does not meet the criteria
+ // won't be unrolled. See CanPerformUnroll LoopUtils.h for more information.
+-Optimizer::PassToken CreateLoopUnrollPass(bool fully_unroll, int factor = 0);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateLoopUnrollPass(bool fully_unroll, int factor = 0);
+ 
+ // Create the SSA rewrite pass.
+ // This pass converts load/store operations on function local variables into
+ // operations on SSA IDs.  This allows SSA optimizers to act on these variables.
+ // Only variables that are local to the function and of supported types are
+ // processed (see IsSSATargetVar for details).
+-Optimizer::PassToken CreateSSARewritePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSSARewritePass();
+ 
+ // Create pass to convert relaxed precision instructions to half precision.
+ // This pass converts as many relaxed float32 arithmetic operations to half as
+@@ -720,25 +720,25 @@ Optimizer::PassToken CreateSSARewritePass();
+ // Best if run after function scope store/load and composite operation
+ // eliminations are run. Also best if followed by instruction simplification,
+ // redundancy elimination and DCE.
+-Optimizer::PassToken CreateConvertRelaxedToHalfPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateConvertRelaxedToHalfPass();
+ 
+-Optimizer::PassToken CreateConvertToUntypedPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateConvertToUntypedPass();
+ 
+ // Create relax float ops pass.
+ // This pass decorates all float32 result instructions with RelaxedPrecision
+ // if not already so decorated.
+-Optimizer::PassToken CreateRelaxFloatOpsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRelaxFloatOpsPass();
+ 
+ // Create copy propagate arrays pass.
+ // This pass looks to copy propagate memory references for arrays.  It looks
+ // for specific code patterns to recognize array copies.
+-Optimizer::PassToken CreateCopyPropagateArraysPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCopyPropagateArraysPass();
+ 
+ // Create a vector dce pass.
+ // This pass looks for components of vectors that are unused, and removes them
+ // from the vector.  Note this would still leave around lots of dead code that
+ // a pass of ADCE will be able to remove.
+-Optimizer::PassToken CreateVectorDCEPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateVectorDCEPass();
+ 
+ // Create a pass to reduce the size of loads.
+ // This pass looks for loads of structures where only a few of its members are
+@@ -746,28 +746,28 @@ Optimizer::PassToken CreateVectorDCEPass();
+ // a load of the specific elements.  The parameter is a threshold to determine
+ // whether we have to replace the load or not.  If the ratio of the used
+ // components of the load is less than the threshold, we replace the load.
+-Optimizer::PassToken CreateReduceLoadSizePass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateReduceLoadSizePass(
+     double load_replacement_threshold = 0.9);
+ 
+ // Create a pass to combine chained access chains.
+ // This pass looks for access chains fed by other access chains and combines
+ // them into a single instruction where possible.
+-Optimizer::PassToken CreateCombineAccessChainsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCombineAccessChainsPass();
+ 
+ // Create a pass to upgrade to the VulkanKHR memory model.
+ // This pass upgrades the Logical GLSL450 memory model to Logical VulkanKHR.
+ // Additionally, it modifies memory, image, atomic and barrier operations to
+ // conform to that model's requirements.
+-Optimizer::PassToken CreateUpgradeMemoryModelPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateUpgradeMemoryModelPass();
+ 
+ // Create a pass to do code sinking.  Code sinking is a transformation
+ // where an instruction is moved into a more deeply nested construct.
+-Optimizer::PassToken CreateCodeSinkingPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCodeSinkingPass();
+ 
+ // Create a pass to fix incorrect storage classes.  In order to make code
+ // generation simpler, DXC may generate code where the storage classes do not
+ // match up correctly.  This pass will fix the errors that it can.
+-Optimizer::PassToken CreateFixStorageClassPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateFixStorageClassPass();
+ 
+ // Creates a graphics robust access pass.
+ //
+@@ -798,7 +798,7 @@ Optimizer::PassToken CreateFixStorageClassPass();
+ //   a 16-bit index, then elements from 2^15 and above are not accessible.
+ //   In this case, the pass will clamp the index between 0 and 2^15-1
+ //   inclusive.
+-Optimizer::PassToken CreateGraphicsRobustAccessPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateGraphicsRobustAccessPass();
+ 
+ // Create a pass to spread Volatile semantics to variables with SMIDNV,
+ // WarpIDNV, SubgroupSize, SubgroupLocalInvocationId, SubgroupEqMask,
+@@ -811,14 +811,14 @@ Optimizer::PassToken CreateGraphicsRobustAccessPass();
+ // SPIR-V"). When the SPIR-V version is 1.6 or above, the pass also spreads
+ // the Volatile semantics to a variable with HelperInvocation BuiltIn decoration
+ // in the fragement shader.
+-Optimizer::PassToken CreateSpreadVolatileSemanticsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSpreadVolatileSemanticsPass();
+ 
+ // Create a pass to replace a descriptor access using variable index.
+ // This pass replaces every access using a variable index to array variable
+ // |desc| that has a DescriptorSet and Binding decorations with a constant
+ // element of the array. In order to replace the access using a variable index
+ // with the constant element, it uses a switch statement.
+-Optimizer::PassToken CreateReplaceDescArrayAccessUsingVarIndexPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateReplaceDescArrayAccessUsingVarIndexPass();
+ 
+ // Create descriptor scalar replacement pass.
+ // This pass replaces every array variable |desc| that has a DescriptorSet and
+@@ -830,22 +830,22 @@ Optimizer::PassToken CreateReplaceDescArrayAccessUsingVarIndexPass();
+ // invalid Spir-V.  All accesses to |desc| must be OpAccessChain instructions
+ // with a literal index for the first index. This variant flattens both
+ // composites and arrays.
+-Optimizer::PassToken CreateDescriptorScalarReplacementPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDescriptorScalarReplacementPass();
+ // This variant flattens only composites.
+-Optimizer::PassToken CreateDescriptorCompositeScalarReplacementPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDescriptorCompositeScalarReplacementPass();
+ // This variant flattens only arrays.
+-Optimizer::PassToken CreateDescriptorArrayScalarReplacementPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateDescriptorArrayScalarReplacementPass();
+ 
+ // Create a pass to replace each OpKill instruction with a function call to a
+ // function that has a single OpKill.  Also replace each OpTerminateInvocation
+ // instruction  with a function call to a function that has a single
+ // OpTerminateInvocation.  This allows more code to be inlined.
+-Optimizer::PassToken CreateWrapOpKillPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateWrapOpKillPass();
+ 
+ // Replaces the extensions VK_AMD_shader_ballot,VK_AMD_gcn_shader, and
+ // VK_AMD_shader_trinary_minmax with equivalent code using core instructions and
+ // capabilities.
+-Optimizer::PassToken CreateAmdExtToKhrPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateAmdExtToKhrPass();
+ 
+ // Replaces the internal version of GLSLstd450 InterpolateAt* extended
+ // instructions with the externally valid version. The internal version allows
+@@ -854,13 +854,13 @@ Optimizer::PassToken CreateAmdExtToKhrPass();
+ // frontends will create the internal version for HLSL. This pass will be part
+ // of HLSL legalization and should be called after interpolants have been
+ // propagated into their final positions.
+-Optimizer::PassToken CreateInterpolateFixupPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInterpolateFixupPass();
+ 
+ // Replace OpExtInst instructions with OpExtInstWithForwardRefsKHR when
+ // the instruction contains a forward reference to another debug instuction.
+ // Replace OpExtInstWithForwardRefsKHR with OpExtInst when there are no forward
+ // reference to another debug instruction.
+-Optimizer::PassToken CreateOpExtInstWithForwardReferenceFixupPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateOpExtInstWithForwardReferenceFixupPass();
+ 
+ // Removes unused components from composite input variables. Current
+ // implementation just removes trailing unused components from input arrays
+@@ -873,7 +873,7 @@ Optimizer::PassToken CreateOpExtInstWithForwardReferenceFixupPass();
+ // shader in the pipeline. If applied to non-vertex shaders, the user should
+ // follow by applying EliminateDeadOutputStores and
+ // EliminateDeadOutputComponents to the preceding shader.
+-Optimizer::PassToken CreateEliminateDeadInputComponentsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadInputComponentsPass();
+ 
+ // Removes unused components from composite output variables. Current
+ // implementation just removes trailing unused components from output arrays
+@@ -886,7 +886,7 @@ Optimizer::PassToken CreateEliminateDeadInputComponentsPass();
+ // interface incompatibility with the following shader in the pipeline. The
+ // user should first apply EliminateDeadInputComponents to the following
+ // shader, then apply EliminateDeadOutputStores to this shader.
+-Optimizer::PassToken CreateEliminateDeadOutputComponentsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadOutputComponentsPass();
+ 
+ // Removes unused components from composite input variables. This safe
+ // version will not cause interface incompatibilities since it only changes
+@@ -894,14 +894,14 @@ Optimizer::PassToken CreateEliminateDeadOutputComponentsPass();
+ // components from input structs and input arrays. The pass performs best
+ // after maximizing dead code removal. A subsequent dead code elimination
+ // pass would be beneficial in removing newly unused component types.
+-Optimizer::PassToken CreateEliminateDeadInputComponentsSafePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadInputComponentsSafePass();
+ 
+ // Analyzes shader and populates |live_locs| and |live_builtins|. Best results
+ // will be obtained if shader has all dead code eliminated first. |live_locs|
+ // and |live_builtins| are subsequently used when calling
+ // CreateEliminateDeadOutputStoresPass on the preceding shader. Currently only
+ // supports tesc, tese, geom, and frag shaders.
+-Optimizer::PassToken CreateAnalyzeLiveInputPass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateAnalyzeLiveInputPass(
+     std::unordered_set<uint32_t>* live_locs,
+     std::unordered_set<uint32_t>* live_builtins);
+ 
+@@ -912,7 +912,7 @@ Optimizer::PassToken CreateAnalyzeLiveInputPass(
+ // CreateEliminateDeadOutputComponentsPass will eliminate any dead output
+ // components created by the elimination of the stores. Currently only supports
+ // vert, tesc, tese, and geom shaders.
+-Optimizer::PassToken CreateEliminateDeadOutputStoresPass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateEliminateDeadOutputStoresPass(
+     std::unordered_set<uint32_t>* live_locs,
+     std::unordered_set<uint32_t>* live_builtins);
+ 
+@@ -922,24 +922,24 @@ Optimizer::PassToken CreateEliminateDeadOutputStoresPass(
+ // binding that is one of the given pairs, they will be converted to a sampled
+ // image. In addition, if only an image has the descriptor set and binding that
+ // is one of the given pairs, it will be converted to a sampled image as well.
+-Optimizer::PassToken CreateConvertToSampledImagePass(
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateConvertToSampledImagePass(
+     const std::vector<opt::DescriptorSetAndBinding>&
+         descriptor_set_binding_pairs);
+ 
+ // Create an interface-variable-scalar-replacement pass that replaces array or
+ // matrix interface variables with a series of scalar or vector interface
+ // variables. For example, it replaces `float3 foo[2]` with `float3 foo0, foo1`.
+-Optimizer::PassToken CreateInterfaceVariableScalarReplacementPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInterfaceVariableScalarReplacementPass();
+ 
+ // Creates a remove-dont-inline pass to remove the |DontInline| function control
+ // from every function in the module.  This is useful if you want the inliner to
+ // inline these functions some reason.
+-Optimizer::PassToken CreateRemoveDontInlinePass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateRemoveDontInlinePass();
+ // Create a fix-func-call-param pass to fix non memory argument for the function
+ // call, as spirv-validation requires function parameters to be an memory
+ // object, currently the pass would remove accesschain pointer argument passed
+ // to the function
+-Optimizer::PassToken CreateFixFuncCallArgumentsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateFixFuncCallArgumentsPass();
+ 
+ // Creates a trim-capabilities pass.
+ // This pass removes unused capabilities for a given module, and if possible,
+@@ -949,7 +949,7 @@ Optimizer::PassToken CreateFixFuncCallArgumentsPass();
+ // If the module contains unsupported capabilities, this pass will ignore them.
+ // This should be fine in most cases, but could yield to incorrect results if
+ // the unknown capability interacts with one of the trimmed capabilities.
+-Optimizer::PassToken CreateTrimCapabilitiesPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateTrimCapabilitiesPass();
+ 
+ // Creates a struct-packing pass.
+ // This pass re-assigns all offset layout decorators to tightly pack
+@@ -957,29 +957,29 @@ Optimizer::PassToken CreateTrimCapabilitiesPass();
+ // rule. Accepted packing rules are: std140, std140EnhancedLayout, std430,
+ // std430EnhancedLayout, hlslCbuffer, hlslCbufferPackOffset, scalar,
+ // scalarEnhancedLayout.
+-Optimizer::PassToken CreateStructPackingPass(const char* structToPack,
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateStructPackingPass(const char* structToPack,
+                                              const char* packingRule);
+ 
+ // Creates a switch-descriptorset pass.
+ // This pass changes any DescriptorSet decorations with the value |ds_from| to
+ // use the new value |ds_to|.
+-Optimizer::PassToken CreateSwitchDescriptorSetPass(uint32_t ds_from,
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSwitchDescriptorSetPass(uint32_t ds_from,
+                                                    uint32_t ds_to);
+ 
+ // Creates an invocation interlock placement pass.
+ // This pass ensures that an entry point will have at most one
+ // OpBeginInterlockInvocationEXT and one OpEndInterlockInvocationEXT, in that
+ // order.
+-Optimizer::PassToken CreateInvocationInterlockPlacementPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateInvocationInterlockPlacementPass();
+ 
+ // Creates a pass to add/remove maximal reconvergence execution mode.
+ // This pass either adds or removes maximal reconvergence from all entry points.
+-Optimizer::PassToken CreateModifyMaximalReconvergencePass(bool add);
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateModifyMaximalReconvergencePass(bool add);
+ 
+ // Creates a pass to split combined image+sampler variables and function
+ // parameters into separate image and sampler parts. Binding numbers and
+ // other decorations are copied.
+-Optimizer::PassToken CreateSplitCombinedImageSamplerPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateSplitCombinedImageSamplerPass();
+ 
+ // Creates a pass to remap bindings to avoid conflicts, assuming the module
+ // is valid for Vulkan.  A conflict exits when an entry point uses two distinct
+@@ -1028,7 +1028,7 @@ Optimizer::PassToken CreateSplitCombinedImageSamplerPass();
+ //
+ // This pass assumes binding numbers are not applid via decoration groups
+ // (OpDecorationGroup).
+-Optimizer::PassToken CreateResolveBindingConflictsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateResolveBindingConflictsPass();
+ 
+ // Create a pass to canonicalize IDs to improve compression of SPIR-V binary
+ // files. The resulting modules have an increased ID range (IDs are not as
+@@ -1038,7 +1038,7 @@ Optimizer::PassToken CreateResolveBindingConflictsPass();
+ // passes except for
+ // --strip-debug because this pass will use OpName to canonicalize IDs. i.e. Run
+ // --strip-debug after this pass.
+-Optimizer::PassToken CreateCanonicalizeIdsPass();
++SPIRV_TOOLS_OPT_EXPORT Optimizer::PassToken CreateCanonicalizeIdsPass();
+ }  // namespace spvtools
+ 
+ #endif  // INCLUDE_SPIRV_TOOLS_OPTIMIZER_HPP_
+diff --git a/source/CMakeLists.txt b/source/CMakeLists.txt
+index d45a2218..2e872442 100644
+--- a/source/CMakeLists.txt
++++ b/source/CMakeLists.txt
+@@ -384,6 +384,7 @@ else()
+     target_link_libraries(${SPIRV_TOOLS} PRIVATE mimalloc-static)
+   endif()
+   spirv_tools_default_target_options(${SPIRV_TOOLS})
++  spvtools_export_macros(${SPIRV_TOOLS} SPIRV_TOOLS)
+   set(SPIRV_TOOLS_TARGETS ${SPIRV_TOOLS} ${SPIRV_TOOLS}-shared)
+ endif()
+ 
+diff --git a/source/diagnostic.h b/source/diagnostic.h
+index d45d4b0f..1f6e0dfb 100644
+--- a/source/diagnostic.h
++++ b/source/diagnostic.h
+@@ -26,7 +26,7 @@ namespace spvtools {
+ // code, and captures diagnostic messages via the left-shift operator.
+ // If the error code is not SPV_FAILED_MATCH, then captured messages are
+ // emitted during the destructor.
+-class DiagnosticStream {
++class SPIRV_TOOLS_EXPORT DiagnosticStream {
+  public:
+   DiagnosticStream(spv_position_t position, const MessageConsumer& consumer,
+                    const std::string& disassembled_instruction,
+@@ -72,10 +72,10 @@ class DiagnosticStream {
+ //
+ // This function expects that |diagnostic| is not nullptr and its content is a
+ // nullptr.
+-void UseDiagnosticAsMessageConsumer(spv_context context,
++SPIRV_TOOLS_EXPORT void UseDiagnosticAsMessageConsumer(spv_context context,
+                                     spv_diagnostic* diagnostic);
+ 
+-std::string spvResultToString(spv_result_t res);
++SPIRV_TOOLS_EXPORT std::string spvResultToString(spv_result_t res);
+ 
+ }  // namespace spvtools
+ 
+diff --git a/source/diff/CMakeLists.txt b/source/diff/CMakeLists.txt
+index 2bd61060..dfa7bd98 100644
+--- a/source/diff/CMakeLists.txt
++++ b/source/diff/CMakeLists.txt
+@@ -29,6 +29,7 @@ if (SPIRV_TOOLS_USE_MIMALLOC AND (NOT SPIRV_TOOLS_BUILD_STATIC OR SPIRV_TOOLS_US
+ endif()
+ 
+ spvtools_default_compile_options(SPIRV-Tools-diff)
++spvtools_export_macros(SPIRV-Tools-diff SPIRV_TOOLS_DIFF)
+ target_include_directories(SPIRV-Tools-diff
+   PUBLIC
+ 	$<BUILD_INTERFACE:${spirv-tools_SOURCE_DIR}/include>
+diff --git a/source/diff/diff.h b/source/diff/diff.h
+index 932de9ee..af843252 100644
+--- a/source/diff/diff.h
++++ b/source/diff/diff.h
+@@ -39,7 +39,7 @@ struct Options {
+ // module; e.g. any + lines (showing instructions from the dst module) have
+ // their ids mapped to the matched instruction in the src module (or a new id
+ // allocated in the src module if unmatched).
+-spv_result_t Diff(opt::IRContext* src, opt::IRContext* dst, std::ostream& out,
++SPIRV_TOOLS_DIFF_EXPORT spv_result_t Diff(opt::IRContext* src, opt::IRContext* dst, std::ostream& out,
+                   Options options);
+ 
+ }  // namespace diff
+diff --git a/source/disassemble.h b/source/disassemble.h
+index 7165a048..3a085724 100644
+--- a/source/disassemble.h
++++ b/source/disassemble.h
+@@ -30,7 +30,7 @@ namespace spvtools {
+ // SPV_BINARY_TO_TEXT_OPTION_PRINT will be ignored). Decoded text will be
+ // stored into *text. Any error will be written into *diagnostic if diagnostic
+ // is non-null.
+-std::string spvInstructionBinaryToText(const spv_target_env env,
++SPIRV_TOOLS_EXPORT std::string spvInstructionBinaryToText(const spv_target_env env,
+                                        const uint32_t* inst_binary,
+                                        const size_t inst_word_count,
+                                        const uint32_t* binary,
+@@ -42,10 +42,14 @@ namespace disassemble {
+ // Shared code with other tools (than the disassembler) that might need to
+ // output disassembly. An InstructionDisassembler instance converts SPIR-V
+ // binary for an instruction to its assembly representation.
+-class InstructionDisassembler {
++class SPIRV_TOOLS_EXPORT InstructionDisassembler {
+  public:
+   InstructionDisassembler(std::ostream& stream, uint32_t options,
+                           NameMapper name_mapper);
++  // Not copyable. Declared explicitly because MSVC defines the implicit copy
++  // operations of dllexport'ed classes, which fails for id_comments_.
++  InstructionDisassembler(const InstructionDisassembler&) = delete;
++  InstructionDisassembler& operator=(const InstructionDisassembler&) = delete;
+ 
+   // Emits the assembly header for the module.
+   void EmitHeaderSpirv();
+diff --git a/source/ext_inst.h b/source/ext_inst.h
+index 3c3150b4..440d1dde 100644
+--- a/source/ext_inst.h
++++ b/source/ext_inst.h
+@@ -19,12 +19,12 @@
+ #include "spirv-tools/libspirv.h"
+ 
+ // Gets the type of the extended instruction set with the specified name.
+-spv_ext_inst_type_t spvExtInstImportTypeGet(const char* name);
++SPIRV_TOOLS_EXPORT spv_ext_inst_type_t spvExtInstImportTypeGet(const char* name);
+ 
+ // Returns true if the extended instruction set is non-semantic
+-bool spvExtInstIsNonSemantic(const spv_ext_inst_type_t type);
++SPIRV_TOOLS_EXPORT bool spvExtInstIsNonSemantic(const spv_ext_inst_type_t type);
+ 
+ // Returns true if the extended instruction set is debug info
+-bool spvExtInstIsDebugInfo(const spv_ext_inst_type_t type);
++SPIRV_TOOLS_EXPORT bool spvExtInstIsDebugInfo(const spv_ext_inst_type_t type);
+ 
+ #endif  // SOURCE_EXT_INST_H_
+diff --git a/source/link/CMakeLists.txt b/source/link/CMakeLists.txt
+index 5fd89c38..0a33c544 100644
+--- a/source/link/CMakeLists.txt
++++ b/source/link/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_library(SPIRV-Tools-link ${SPIRV_TOOLS_LIBRARY_TYPE}
+ )
+ 
+ spvtools_default_compile_options(SPIRV-Tools-link)
++spvtools_export_macros(SPIRV-Tools-link SPIRV_TOOLS_LINK)
+ target_include_directories(SPIRV-Tools-link
+   PUBLIC
+     $<BUILD_INTERFACE:${spirv-tools_SOURCE_DIR}/include>
+diff --git a/source/lint/CMakeLists.txt b/source/lint/CMakeLists.txt
+index c2636ae5..a81c4d6c 100644
+--- a/source/lint/CMakeLists.txt
++++ b/source/lint/CMakeLists.txt
+@@ -23,6 +23,7 @@ set(SPIRV_TOOLS_LINT_SOURCES
+ add_library(SPIRV-Tools-lint ${SPIRV_TOOLS_LIBRARY_TYPE} ${SPIRV_TOOLS_LINT_SOURCES})
+ 
+ spvtools_default_compile_options(SPIRV-Tools-lint)
++spvtools_export_macros(SPIRV-Tools-lint SPIRV_TOOLS_LINT)
+ target_include_directories(SPIRV-Tools-lint
+   PUBLIC
+ 	$<BUILD_INTERFACE:${spirv-tools_SOURCE_DIR}/include>
+diff --git a/source/name_mapper.h b/source/name_mapper.h
+index 106a0127..312bdeca 100644
+--- a/source/name_mapper.h
++++ b/source/name_mapper.h
+@@ -31,7 +31,7 @@ namespace spvtools {
+ using NameMapper = std::function<std::string(uint32_t)>;
+ 
+ // Returns a NameMapper which always maps an Id to its decimal representation.
+-NameMapper GetTrivialNameMapper();
++SPIRV_TOOLS_EXPORT NameMapper GetTrivialNameMapper();
+ 
+ // A FriendlyNameMapper parses a module upon construction.  If the parse is
+ // successful, then the NameForId method maps an Id to a friendly name
+@@ -59,7 +59,7 @@ NameMapper GetTrivialNameMapper();
+ //    pretty simplistic, but workable.
+ //  - A built-in variable maps to its GLSL variable name.
+ //  - Numeric literals in OpConstant map to a human-friendly name.
+-class FriendlyNameMapper {
++class SPIRV_TOOLS_EXPORT FriendlyNameMapper {
+  public:
+   // Construct a friendly name mapper, and determine friendly names for each
+   // defined Id in the specified module.  The module is specified by the code
+diff --git a/source/opcode.h b/source/opcode.h
+index 3469c3b1..88485ed5 100644
+--- a/source/opcode.h
++++ b/source/opcode.h
+@@ -26,127 +26,127 @@
+ // word in the SPIR-V module header.
+ //
+ // See the registry at https://www.khronos.org/registry/spir-v/api/spir-v.xml.
+-const char* spvGeneratorStr(uint32_t generator);
++SPIRV_TOOLS_EXPORT const char* spvGeneratorStr(uint32_t generator);
+ 
+ // Combines word_count and opcode enumerant in single word.
+-uint32_t spvOpcodeMake(uint16_t word_count, spv::Op opcode);
++SPIRV_TOOLS_EXPORT uint32_t spvOpcodeMake(uint16_t word_count, spv::Op opcode);
+ 
+ // Splits word into into two constituent parts: word_count and opcode.
+-void spvOpcodeSplit(const uint32_t word, uint16_t* word_count,
++SPIRV_TOOLS_EXPORT void spvOpcodeSplit(const uint32_t word, uint16_t* word_count,
+                     uint16_t* opcode);
+ 
+ // Copies an instruction's word and fixes the endianness to host native. The
+ // source instruction's stream/opcode/endianness is in the words/opcode/endian
+ // parameter. The word_count parameter specifies the number of words to copy.
+ // Writes copied instruction into *inst.
+-void spvInstructionCopy(const uint32_t* words, const spv::Op opcode,
++SPIRV_TOOLS_EXPORT void spvInstructionCopy(const uint32_t* words, const spv::Op opcode,
+                         const uint16_t word_count,
+                         const spv_endianness_t endian, spv_instruction_t* inst);
+ 
+ // Determine if the given opcode is a scalar type. Returns zero if false,
+ // non-zero otherwise.
+-int32_t spvOpcodeIsScalarType(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeIsScalarType(const spv::Op opcode);
+ 
+ // Determines if the given opcode is a specialization constant. Returns zero if
+ // false, non-zero otherwise.
+-int32_t spvOpcodeIsSpecConstant(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeIsSpecConstant(const spv::Op opcode);
+ 
+ // Determines if the given opcode is a constant. Returns zero if false, non-zero
+ // otherwise.
+-int32_t spvOpcodeIsConstant(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeIsConstant(const spv::Op opcode);
+ 
+ // Returns true if the given opcode is a constant or undef.
+-bool spvOpcodeIsConstantOrUndef(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsConstantOrUndef(const spv::Op opcode);
+ 
+ // Determines if the given opcode is a composite type. Returns zero if false,
+ // non-zero otherwise.
+-int32_t spvOpcodeIsComposite(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeIsComposite(const spv::Op opcode);
+ 
+ // Determines if the given opcode results in a pointer when using the logical
+ // addressing model. Returns zero if false, non-zero otherwise.
+-int32_t spvOpcodeReturnsLogicalPointer(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeReturnsLogicalPointer(const spv::Op opcode);
+ 
+ // Returns whether the given opcode could result in a pointer or a variable
+ // pointer when using the logical addressing model.
+-bool spvOpcodeReturnsLogicalVariablePointer(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeReturnsLogicalVariablePointer(const spv::Op opcode);
+ 
+ // Determines if the given opcode generates a type. Returns zero if false,
+ // non-zero otherwise.
+-int32_t spvOpcodeGeneratesType(spv::Op opcode);
++SPIRV_TOOLS_EXPORT int32_t spvOpcodeGeneratesType(spv::Op opcode);
+ 
+ // Returns true if the opcode adds a decoration to an id.
+-bool spvOpcodeIsDecoration(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsDecoration(const spv::Op opcode);
+ 
+ // Returns true if the opcode is a load from memory into a result id.  This
+ // function only considers core instructions.
+-bool spvOpcodeIsLoad(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsLoad(const spv::Op opcode);
+ 
+ // Returns true if the opcode is an atomic operation that uses the original
+ // value.
+-bool spvOpcodeIsAtomicWithLoad(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsAtomicWithLoad(const spv::Op opcode);
+ 
+ // Returns true if the opcode is an atomic operation.
+-bool spvOpcodeIsAtomicOp(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsAtomicOp(const spv::Op opcode);
+ 
+ // Returns true if the given opcode is a branch instruction.
+-bool spvOpcodeIsBranch(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsBranch(spv::Op opcode);
+ 
+ // Returns true if the given opcode is a return instruction.
+-bool spvOpcodeIsReturn(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsReturn(spv::Op opcode);
+ 
+ // Returns true if the given opcode aborts execution.  To abort means that after
+ // executing that instruction, no other instructions will be executed regardless
+ // of the context in which the instruction appears.  Note that `OpUnreachable`
+ // is considered an abort even if its behaviour is undefined.
+-bool spvOpcodeIsAbort(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsAbort(spv::Op opcode);
+ 
+ // Returns true if the given opcode is a return instruction or it aborts
+ // execution.
+-bool spvOpcodeIsReturnOrAbort(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsReturnOrAbort(spv::Op opcode);
+ 
+ // Returns true if the given opcode is a basic block terminator.
+-bool spvOpcodeIsBlockTerminator(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsBlockTerminator(spv::Op opcode);
+ 
+ // Returns true if the given opcode always defines an opaque type.
+-bool spvOpcodeIsBaseOpaqueType(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsBaseOpaqueType(spv::Op opcode);
+ 
+ // Returns true if the given opcode is a non-uniform group operation.
+-bool spvOpcodeIsNonUniformGroupOperation(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsNonUniformGroupOperation(spv::Op opcode);
+ 
+ // Returns true if the opcode with vector inputs could be divided into a series
+ // of independent scalar operations that would give the same result.
+-bool spvOpcodeIsScalarizable(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsScalarizable(spv::Op opcode);
+ 
+ // Returns true if the given opcode is a debug instruction.
+-bool spvOpcodeIsDebug(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsDebug(spv::Op opcode);
+ 
+ // Returns true for opcodes that are binary operators,
+ // where the order of the operands is irrelevant.
+-bool spvOpcodeIsCommutativeBinaryOperator(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsCommutativeBinaryOperator(spv::Op opcode);
+ 
+ // Returns true for opcodes that represent linear algebra instructions.
+-bool spvOpcodeIsLinearAlgebra(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsLinearAlgebra(spv::Op opcode);
+ 
+ // Returns true for opcodes that represent image sample instructions.
+-bool spvOpcodeIsImageSample(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsImageSample(spv::Op opcode);
+ 
+ // Returns true if the opcode is either OpExtInst or OpExtInstWithForwardRefsKHR
+-bool spvIsExtendedInstruction(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvIsExtendedInstruction(spv::Op opcode);
+ 
+ // Returns a vector containing the indices of the memory semantics <id>
+ // operands for |opcode|.
+-std::vector<uint32_t> spvOpcodeMemorySemanticsOperandIndices(spv::Op opcode);
++SPIRV_TOOLS_EXPORT std::vector<uint32_t> spvOpcodeMemorySemanticsOperandIndices(spv::Op opcode);
+ 
+ // Returns true for opcodes that represent access chain instructions.
+-bool spvOpcodeIsAccessChain(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsAccessChain(spv::Op opcode);
+ 
+ // Returns true for opcodes that represent bit instructions.
+-bool spvOpcodeIsBit(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeIsBit(spv::Op opcode);
+ 
+ // Gets the name of an instruction, without the "Op" prefix.
+-const char* spvOpcodeString(const spv::Op opcode);
++SPIRV_TOOLS_EXPORT const char* spvOpcodeString(const spv::Op opcode);
+ 
+ // Returns true for opcodes that generate an untyped pointer result.
+-bool spvOpcodeGeneratesUntypedPointer(spv::Op opcode);
++SPIRV_TOOLS_EXPORT bool spvOpcodeGeneratesUntypedPointer(spv::Op opcode);
+ 
+ #endif  // SOURCE_OPCODE_H_
+diff --git a/source/operand.h b/source/operand.h
+index 9fc9b745..0b35db75 100644
+--- a/source/operand.h
++++ b/source/operand.h
+@@ -37,21 +37,21 @@
+ using spv_operand_pattern_t = std::vector<spv_operand_type_t>;
+ 
+ // Gets the name string of the non-variable operand type.
+-const char* spvOperandTypeStr(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT const char* spvOperandTypeStr(spv_operand_type_t type);
+ 
+ // Returns true if an operand of the given type is optional.
+-bool spvOperandIsOptional(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT bool spvOperandIsOptional(spv_operand_type_t type);
+ 
+ // Returns true if an operand type represents zero or more logical operands.
+ //
+ // Note that a single logical operand may still be a variable number of words.
+ // For example, a literal string may be many words, but is just one logical
+ // operand.
+-bool spvOperandIsVariable(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT bool spvOperandIsVariable(spv_operand_type_t type);
+ 
+ // Append a list of operand types to the end of the pattern vector.
+ // The types parameter specifies the source span of types.
+-void spvPushOperandTypes(
++SPIRV_TOOLS_EXPORT void spvPushOperandTypes(
+     const spvtools::utils::Span<const spv_operand_type_t>& types,
+     spv_operand_pattern_t* pattern);
+ 
+@@ -63,7 +63,7 @@ void spvPushOperandTypes(
+ // appear after operands for a more significant bit.
+ //
+ // If a set bit is unknown, then we assume it has no operands.
+-void spvPushOperandTypesForMask(const spv_operand_type_t mask_type,
++SPIRV_TOOLS_EXPORT void spvPushOperandTypesForMask(const spv_operand_type_t mask_type,
+                                 const uint32_t mask,
+                                 spv_operand_pattern_t* pattern);
+ 
+@@ -86,7 +86,7 @@ void spvPushOperandTypesForMask(const spv_operand_type_t mask_type,
+ // non-optional.
+ //
+ // Returns true if we modified the pattern.
+-bool spvExpandOperandSequenceOnce(spv_operand_type_t type,
++SPIRV_TOOLS_EXPORT bool spvExpandOperandSequenceOnce(spv_operand_type_t type,
+                                   spv_operand_pattern_t* pattern);
+ 
+ // Expands the first element in the pattern until it is a matchable operand
+@@ -95,34 +95,34 @@ bool spvExpandOperandSequenceOnce(spv_operand_type_t type,
+ //
+ // A matchable operand type is anything other than a zero-or-more-items
+ // operand type.
+-spv_operand_type_t spvTakeFirstMatchableOperand(spv_operand_pattern_t* pattern);
++SPIRV_TOOLS_EXPORT spv_operand_type_t spvTakeFirstMatchableOperand(spv_operand_pattern_t* pattern);
+ 
+ // Calculates the corresponding post-immediate alternate pattern, which allows
+ // a limited set of operand types.
+-spv_operand_pattern_t spvAlternatePatternFollowingImmediate(
++SPIRV_TOOLS_EXPORT spv_operand_pattern_t spvAlternatePatternFollowingImmediate(
+     const spv_operand_pattern_t& pattern);
+ 
+ // Is the operand an ID?
+-bool spvIsIdType(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT bool spvIsIdType(spv_operand_type_t type);
+ 
+ // Is the operand an input ID?
+-bool spvIsInIdType(spv_operand_type_t type);
++SPIRV_TOOLS_EXPORT bool spvIsInIdType(spv_operand_type_t type);
+ 
+ // Takes the opcode of an instruction and returns
+ // a function object that will return true if the index
+ // of the operand can be forward declared. This function will
+ // used in the SSA validation stage of the pipeline
+-std::function<bool(unsigned)> spvOperandCanBeForwardDeclaredFunction(
++SPIRV_TOOLS_EXPORT std::function<bool(unsigned)> spvOperandCanBeForwardDeclaredFunction(
+     spv::Op opcode);
+ 
+ // Takes the instruction key of a debug info extension instruction
+ // and returns a function object that will return true if the index
+ // of the operand can be forward declared. This function will
+ // used in the SSA validation stage of the pipeline
+-std::function<bool(unsigned)> spvDbgInfoExtOperandCanBeForwardDeclaredFunction(
++SPIRV_TOOLS_EXPORT std::function<bool(unsigned)> spvDbgInfoExtOperandCanBeForwardDeclaredFunction(
+     spv::Op opcode, spv_ext_inst_type_t ext_type, uint32_t key);
+ 
+ // Converts an spv::FPEncoding to spv_fp_encoding_t
+-spv_fp_encoding_t spvFPEncodingFromOperandFPEncoding(spv::FPEncoding encoding);
++SPIRV_TOOLS_EXPORT spv_fp_encoding_t spvFPEncodingFromOperandFPEncoding(spv::FPEncoding encoding);
+ 
+ #endif  // SOURCE_OPERAND_H_
+diff --git a/source/opt/CMakeLists.txt b/source/opt/CMakeLists.txt
+index 61483f39..fd0ab73a 100644
+--- a/source/opt/CMakeLists.txt
++++ b/source/opt/CMakeLists.txt
+@@ -274,6 +274,7 @@ if (SPIRV_TOOLS_USE_MIMALLOC AND (NOT SPIRV_TOOLS_BUILD_STATIC OR SPIRV_TOOLS_US
+ endif()
+ 
+ spvtools_default_compile_options(SPIRV-Tools-opt)
++spvtools_export_macros(SPIRV-Tools-opt SPIRV_TOOLS_OPT)
+ target_include_directories(SPIRV-Tools-opt
+   PUBLIC
+ 	$<BUILD_INTERFACE:${spirv-tools_SOURCE_DIR}/include>
+diff --git a/source/opt/basic_block.h b/source/opt/basic_block.h
+index 24d5fceb..7e17ff10 100644
+--- a/source/opt/basic_block.h
++++ b/source/opt/basic_block.h
+@@ -37,7 +37,7 @@ class Function;
+ class IRContext;
+ 
+ // A SPIR-V basic block.
+-class BasicBlock {
++class SPIRV_TOOLS_OPT_EXPORT BasicBlock {
+  public:
+   using iterator = InstructionList::iterator;
+   using const_iterator = InstructionList::const_iterator;
+diff --git a/source/opt/block_merge_util.h b/source/opt/block_merge_util.h
+index e71e3d6a..adcee3f2 100644
+--- a/source/opt/block_merge_util.h
++++ b/source/opt/block_merge_util.h
+@@ -30,11 +30,11 @@ namespace blockmergeutil {
+ // Returns true if and only if |block| has exactly one successor and merging
+ // this successor into |block| has no impact on the semantics or validity of the
+ // SPIR-V module.
+-bool CanMergeWithSuccessor(IRContext* context, BasicBlock* block);
++SPIRV_TOOLS_OPT_EXPORT bool CanMergeWithSuccessor(IRContext* context, BasicBlock* block);
+ 
+ // Requires that |bi| has a successor that can be safely merged into |bi|, and
+ // performs the merge.
+-void MergeWithSuccessor(IRContext* context, Function* func,
++SPIRV_TOOLS_OPT_EXPORT void MergeWithSuccessor(IRContext* context, Function* func,
+                         Function::iterator bi);
+ 
+ }  // namespace blockmergeutil
+diff --git a/source/opt/build_module.h b/source/opt/build_module.h
+index 0f906c88..7be9c02c 100644
+--- a/source/opt/build_module.h
++++ b/source/opt/build_module.h
+@@ -30,13 +30,13 @@ namespace spvtools {
+ // and sends the errors to |consumer|.  When |extra_line_tracking| is true,
+ // extra OpLine instructions are injected to better presere line numbers while
+ // later transforms mutate the module.
+-std::unique_ptr<opt::IRContext> BuildModule(spv_target_env env,
++SPIRV_TOOLS_OPT_EXPORT std::unique_ptr<opt::IRContext> BuildModule(spv_target_env env,
+                                             MessageConsumer consumer,
+                                             const uint32_t* binary, size_t size,
+                                             bool extra_line_tracking);
+ 
+ // Like above, with extra line tracking turned on.
+-std::unique_ptr<opt::IRContext> BuildModule(spv_target_env env,
++SPIRV_TOOLS_OPT_EXPORT std::unique_ptr<opt::IRContext> BuildModule(spv_target_env env,
+                                             MessageConsumer consumer,
+                                             const uint32_t* binary,
+                                             size_t size);
+@@ -45,7 +45,7 @@ std::unique_ptr<opt::IRContext> BuildModule(spv_target_env env,
+ // SPIR-V assembly |text|.  The |text| will be encoded according to the given
+ // target |env|. Returns nullptr if errors occur and sends the errors to
+ // |consumer|.
+-std::unique_ptr<opt::IRContext> BuildModule(
++SPIRV_TOOLS_OPT_EXPORT std::unique_ptr<opt::IRContext> BuildModule(
+     spv_target_env env, MessageConsumer consumer, const std::string& text,
+     uint32_t assemble_options = SpirvTools::kDefaultAssembleOption);
+ 
+diff --git a/source/opt/cfg.h b/source/opt/cfg.h
+index fa4fef2d..0fdbe071 100644
+--- a/source/opt/cfg.h
++++ b/source/opt/cfg.h
+@@ -26,7 +26,7 @@
+ namespace spvtools {
+ namespace opt {
+ 
+-class CFG {
++class SPIRV_TOOLS_OPT_EXPORT CFG {
+  public:
+   explicit CFG(Module* module);
+ 
+diff --git a/source/opt/compact_ids_pass.h b/source/opt/compact_ids_pass.h
+index d97ae0fa..02446103 100644
+--- a/source/opt/compact_ids_pass.h
++++ b/source/opt/compact_ids_pass.h
+@@ -23,7 +23,7 @@ namespace spvtools {
+ namespace opt {
+ 
+ // See optimizer.hpp for documentation.
+-class CompactIdsPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT CompactIdsPass : public Pass {
+  public:
+   const char* name() const override { return "compact-ids"; }
+   Status Process() override;
+diff --git a/source/opt/const_folding_rules.h b/source/opt/const_folding_rules.h
+index fa345321..1d538d26 100644
+--- a/source/opt/const_folding_rules.h
++++ b/source/opt/const_folding_rules.h
+@@ -52,7 +52,7 @@ using ConstantFoldingRule = std::function<const analysis::Constant*(
+     IRContext* ctx, Instruction* inst,
+     const std::vector<const analysis::Constant*>& constants)>;
+ 
+-class ConstantFoldingRules {
++class SPIRV_TOOLS_OPT_EXPORT ConstantFoldingRules {
+  protected:
+   // The |Key| and |Value| structs are used to by-pass a "decorated name length
+   // exceeded, name was truncated" warning on VS2013 and VS2015.
+diff --git a/source/opt/constants.h b/source/opt/constants.h
+index c7f620c1..4c0d07be 100644
+--- a/source/opt/constants.h
++++ b/source/opt/constants.h
+@@ -56,7 +56,7 @@ class ConstantManager;
+ 
+ // Abstract class for a SPIR-V constant. It has a bunch of As<subclass> methods,
+ // which is used as a way to probe the actual <subclass>
+-class Constant {
++class SPIRV_TOOLS_OPT_EXPORT Constant {
+  public:
+   Constant() = delete;
+   virtual ~Constant() = default;
+@@ -145,7 +145,7 @@ class Constant {
+ };
+ 
+ // Abstract class for scalar type constants.
+-class ScalarConstant : public Constant {
++class SPIRV_TOOLS_OPT_EXPORT ScalarConstant : public Constant {
+  public:
+   ScalarConstant() = delete;
+   ScalarConstant* AsScalarConstant() override { return this; }
+@@ -190,7 +190,7 @@ class ScalarConstant : public Constant {
+ };
+ 
+ // Integer type constant.
+-class IntConstant : public ScalarConstant {
++class SPIRV_TOOLS_OPT_EXPORT IntConstant : public ScalarConstant {
+  public:
+   IntConstant(const Integer* ty, const std::vector<uint32_t>& w)
+       : ScalarConstant(ty, w) {}
+@@ -225,7 +225,7 @@ class IntConstant : public ScalarConstant {
+ };
+ 
+ // Float type constant.
+-class FloatConstant : public ScalarConstant {
++class SPIRV_TOOLS_OPT_EXPORT FloatConstant : public ScalarConstant {
+  public:
+   FloatConstant(const Float* ty, const std::vector<uint32_t>& w)
+       : ScalarConstant(ty, w) {}
+@@ -266,7 +266,7 @@ class FloatConstant : public ScalarConstant {
+ };
+ 
+ // Bool type constant.
+-class BoolConstant : public ScalarConstant {
++class SPIRV_TOOLS_OPT_EXPORT BoolConstant : public ScalarConstant {
+  public:
+   BoolConstant(const Bool* ty, bool v)
+       : ScalarConstant(ty, {static_cast<uint32_t>(v)}), value_(v) {}
+@@ -289,7 +289,7 @@ class BoolConstant : public ScalarConstant {
+ };
+ 
+ // Abstract class for composite constants.
+-class CompositeConstant : public Constant {
++class SPIRV_TOOLS_OPT_EXPORT CompositeConstant : public Constant {
+  public:
+   CompositeConstant() = delete;
+   CompositeConstant* AsCompositeConstant() override { return this; }
+@@ -321,7 +321,7 @@ class CompositeConstant : public Constant {
+ };
+ 
+ // Struct type constant.
+-class StructConstant : public CompositeConstant {
++class SPIRV_TOOLS_OPT_EXPORT StructConstant : public CompositeConstant {
+  public:
+   StructConstant(const Struct* ty) : CompositeConstant(ty) {}
+   StructConstant(const Struct* ty,
+@@ -343,7 +343,7 @@ class StructConstant : public CompositeConstant {
+ };
+ 
+ // Vector type constant.
+-class VectorConstant : public CompositeConstant {
++class SPIRV_TOOLS_OPT_EXPORT VectorConstant : public CompositeConstant {
+  public:
+   VectorConstant(const Vector* ty)
+       : CompositeConstant(ty), component_type_(ty->element_type()) {}
+@@ -376,7 +376,7 @@ class VectorConstant : public CompositeConstant {
+ };
+ 
+ // Matrix type constant.
+-class MatrixConstant : public CompositeConstant {
++class SPIRV_TOOLS_OPT_EXPORT MatrixConstant : public CompositeConstant {
+  public:
+   MatrixConstant(const Matrix* ty)
+       : CompositeConstant(ty), component_type_(ty->element_type()) {}
+@@ -409,7 +409,7 @@ class MatrixConstant : public CompositeConstant {
+ };
+ 
+ // Array type constant.
+-class ArrayConstant : public CompositeConstant {
++class SPIRV_TOOLS_OPT_EXPORT ArrayConstant : public CompositeConstant {
+  public:
+   ArrayConstant(const Array* ty) : CompositeConstant(ty) {}
+   ArrayConstant(const Array* ty, const std::vector<const Constant*>& components)
+@@ -430,7 +430,7 @@ class ArrayConstant : public CompositeConstant {
+ };
+ 
+ // Tensor type constant.
+-class TensorConstant : public CompositeConstant {
++class SPIRV_TOOLS_OPT_EXPORT TensorConstant : public CompositeConstant {
+  public:
+   TensorConstant(const TensorARM* ty) : CompositeConstant(ty) {}
+   TensorConstant(const TensorARM* ty,
+@@ -452,7 +452,7 @@ class TensorConstant : public CompositeConstant {
+ };
+ 
+ // Null type constant.
+-class NullConstant : public Constant {
++class SPIRV_TOOLS_OPT_EXPORT NullConstant : public Constant {
+  public:
+   NullConstant(const Type* ty) : Constant(ty) {}
+   NullConstant* AsNullConstant() override { return this; }
+@@ -524,9 +524,13 @@ struct ConstantEqual {
+ };
+ 
+ // This class represents a pool of constants.
+-class ConstantManager {
++class SPIRV_TOOLS_OPT_EXPORT ConstantManager {
+  public:
+   ConstantManager(IRContext* ctx);
++  // Not copyable. Declared explicitly because MSVC defines the implicit copy
++  // operations of dllexport'ed classes, which fails for owned_constants_.
++  ConstantManager(const ConstantManager&) = delete;
++  ConstantManager& operator=(const ConstantManager&) = delete;
+ 
+   IRContext* context() const { return ctx_; }
+ 
+diff --git a/source/opt/control_dependence.h b/source/opt/control_dependence.h
+index 993f3793..894fab99 100644
+--- a/source/opt/control_dependence.h
++++ b/source/opt/control_dependence.h
+@@ -28,7 +28,7 @@
+ namespace spvtools {
+ namespace opt {
+ 
+-class ControlDependence {
++class SPIRV_TOOLS_OPT_EXPORT ControlDependence {
+  public:
+   // The label of the source of this dependence, i.e. the block on which the
+   // target is dependent on.
+@@ -101,7 +101,7 @@ std::ostream& operator<<(std::ostream& os, const ControlDependence& dep);
+ //    (i.e., A does not postdominate B), and
+ // 2. there exists a path B -> b_1 -> ... -> b_n -> A such that A post-dominates
+ //    all nodes b_i.
+-class ControlDependenceAnalysis {
++class SPIRV_TOOLS_OPT_EXPORT ControlDependenceAnalysis {
+  public:
+   // Map basic block labels to control dependencies/dependents.
+   // Not guaranteed to be in any particular order.
+diff --git a/source/opt/dataflow.h b/source/opt/dataflow.h
+index be07415d..a0898572 100644
+--- a/source/opt/dataflow.h
++++ b/source/opt/dataflow.h
+@@ -29,7 +29,7 @@ namespace opt {
+ // Maintains a worklist of instructions to process and processes them in a
+ // specified order. See also ForwardDataFlowAnalysis, which is specialized for
+ // forward data-flow analysis.
+-class DataFlowAnalysis {
++class SPIRV_TOOLS_OPT_EXPORT DataFlowAnalysis {
+  public:
+   // The result of a |Visit| operation on an instruction.
+   // This is used to determine when analysis has reached a fixpoint.
+@@ -101,7 +101,7 @@ class DataFlowAnalysis {
+ };
+ 
+ // A generic data flow analysis, specialized for forward analysis.
+-class ForwardDataFlowAnalysis : public DataFlowAnalysis {
++class SPIRV_TOOLS_OPT_EXPORT ForwardDataFlowAnalysis : public DataFlowAnalysis {
+  public:
+   // Indicates where labels should be in the worklist RPO ordering.
+   enum class LabelPosition {
+diff --git a/source/opt/decoration_manager.h b/source/opt/decoration_manager.h
+index 2be016a7..76f3c8d5 100644
+--- a/source/opt/decoration_manager.h
++++ b/source/opt/decoration_manager.h
+@@ -28,7 +28,7 @@ namespace opt {
+ namespace analysis {
+ 
+ // A class for analyzing and managing decorations in an Module.
+-class DecorationManager {
++class SPIRV_TOOLS_OPT_EXPORT DecorationManager {
+  public:
+   // Constructs a decoration manager from the given |module|
+   explicit DecorationManager(Module* module) : module_(module) {
+diff --git a/source/opt/def_use_manager.h b/source/opt/def_use_manager.h
+index 13cf9bd3..457495f3 100644
+--- a/source/opt/def_use_manager.h
++++ b/source/opt/def_use_manager.h
+@@ -72,7 +72,7 @@ struct UserEntryLess {
+ };
+ 
+ // A class for analyzing and managing defs and uses in an Module.
+-class DefUseManager {
++class SPIRV_TOOLS_OPT_EXPORT DefUseManager {
+  public:
+   using IdToDefMap = std::unordered_map<uint32_t, Instruction*>;
+ 
+diff --git a/source/opt/dominator_analysis.h b/source/opt/dominator_analysis.h
+index db94220a..8d1288b8 100644
+--- a/source/opt/dominator_analysis.h
++++ b/source/opt/dominator_analysis.h
+@@ -24,7 +24,7 @@ namespace spvtools {
+ namespace opt {
+ 
+ // Interface to perform dominator or postdominator analysis on a given function.
+-class DominatorAnalysisBase {
++class SPIRV_TOOLS_OPT_EXPORT DominatorAnalysisBase {
+  public:
+   explicit DominatorAnalysisBase(bool is_post_dom) : tree_(is_post_dom) {}
+ 
+@@ -126,13 +126,13 @@ class DominatorAnalysisBase {
+ };
+ 
+ // Derived class for normal dominator analysis.
+-class DominatorAnalysis : public DominatorAnalysisBase {
++class SPIRV_TOOLS_OPT_EXPORT DominatorAnalysis : public DominatorAnalysisBase {
+  public:
+   DominatorAnalysis() : DominatorAnalysisBase(false) {}
+ };
+ 
+ // Derived class for postdominator analysis.
+-class PostDominatorAnalysis : public DominatorAnalysisBase {
++class SPIRV_TOOLS_OPT_EXPORT PostDominatorAnalysis : public DominatorAnalysisBase {
+  public:
+   PostDominatorAnalysis() : DominatorAnalysisBase(true) {}
+ };
+diff --git a/source/opt/dominator_tree.h b/source/opt/dominator_tree.h
+index 702afc05..e50cb420 100644
+--- a/source/opt/dominator_tree.h
++++ b/source/opt/dominator_tree.h
+@@ -90,7 +90,7 @@ struct DominatorTreeNode {
+ 
+ // A class representing a tree of BasicBlocks in a given function, where each
+ // node is dominated by its parent.
+-class DominatorTree {
++class SPIRV_TOOLS_OPT_EXPORT DominatorTree {
+  public:
+   // Map OpLabel ids to dominator tree nodes
+   using DominatorTreeNodeMap = std::map<uint32_t, DominatorTreeNode>;
+diff --git a/source/opt/feature_manager.h b/source/opt/feature_manager.h
+index a0caac70..8e56e0f1 100644
+--- a/source/opt/feature_manager.h
++++ b/source/opt/feature_manager.h
+@@ -23,7 +23,7 @@ namespace spvtools {
+ namespace opt {
+ 
+ // Tracks features enabled by a module. The IRContext has a FeatureManager.
+-class FeatureManager {
++class SPIRV_TOOLS_OPT_EXPORT FeatureManager {
+  public:
+   // Returns true if |ext| is an enabled extension in the module.
+   bool HasExtension(Extension ext) const { return extensions_.contains(ext); }
+diff --git a/source/opt/folding_rules.h b/source/opt/folding_rules.h
+index b51e0ce4..4a37b4ea 100644
+--- a/source/opt/folding_rules.h
++++ b/source/opt/folding_rules.h
+@@ -56,7 +56,7 @@ using FoldingRule = std::function<bool(
+     IRContext* context, Instruction* inst,
+     const std::vector<const analysis::Constant*>& constants)>;
+ 
+-class FoldingRules {
++class SPIRV_TOOLS_OPT_EXPORT FoldingRules {
+  public:
+   using FoldingRuleSet = std::vector<FoldingRule>;
+ 
+diff --git a/source/opt/function.h b/source/opt/function.h
+index 39ecd594..815e0ebd 100644
+--- a/source/opt/function.h
++++ b/source/opt/function.h
+@@ -36,7 +36,7 @@ class IRContext;
+ class Module;
+ 
+ // A SPIR-V function.
+-class Function {
++class SPIRV_TOOLS_OPT_EXPORT Function {
+  public:
+   using iterator = UptrVectorIterator<BasicBlock>;
+   using const_iterator = UptrVectorIterator<BasicBlock, true>;
+diff --git a/source/opt/instruction.h b/source/opt/instruction.h
+index 9ab9f0e4..f0350617 100644
+--- a/source/opt/instruction.h
++++ b/source/opt/instruction.h
+@@ -179,7 +179,7 @@ class DebugScope {
+ // appearing before this instruction. Note that the result id of an instruction
+ // should never change after the instruction being built. If the result id
+ // needs to change, the user should create a new instruction instead.
+-class Instruction : public utils::IntrusiveNodeBase<Instruction> {
++class SPIRV_TOOLS_OPT_EXPORT Instruction : public utils::IntrusiveNodeBase<Instruction> {
+  public:
+   using OperandList = std::vector<Operand>;
+   using iterator = OperandList::iterator;
+diff --git a/source/opt/instruction_list.h b/source/opt/instruction_list.h
+index 4d9768a9..1a33e63a 100644
+--- a/source/opt/instruction_list.h
++++ b/source/opt/instruction_list.h
+@@ -41,7 +41,7 @@ namespace opt {
+ // explicit.  For example, RemoveFromList takes ownership from the list, but
+ // does not return an std::unique_ptr to signal that.  When we fully decide on
+ // ownership, this will have to be fixed up one way or the other.
+-class InstructionList : public utils::IntrusiveList<Instruction> {
++class SPIRV_TOOLS_OPT_EXPORT InstructionList : public utils::IntrusiveList<Instruction> {
+  public:
+   InstructionList() = default;
+   InstructionList(InstructionList&& that)
+@@ -55,7 +55,7 @@ class InstructionList : public utils::IntrusiveList<Instruction> {
+   // Destroy this list and any instructions in the list.
+   inline ~InstructionList() override;
+ 
+-  class iterator : public utils::IntrusiveList<Instruction>::iterator {
++  class SPIRV_TOOLS_OPT_EXPORT iterator : public utils::IntrusiveList<Instruction>::iterator {
+    public:
+     iterator(const utils::IntrusiveList<Instruction>::iterator& i)
+         : utils::IntrusiveList<Instruction>::iterator(i) {}
+diff --git a/source/opt/ir_context.h b/source/opt/ir_context.h
+index f4a69fc4..46f89d1e 100644
+--- a/source/opt/ir_context.h
++++ b/source/opt/ir_context.h
+@@ -50,7 +50,7 @@
+ namespace spvtools {
+ namespace opt {
+ 
+-class IRContext {
++class SPIRV_TOOLS_OPT_EXPORT IRContext {
+  public:
+   // Available analyses.
+   //
+diff --git a/source/opt/loop_descriptor.h b/source/opt/loop_descriptor.h
+index 3b84caba..260b6d20 100644
+--- a/source/opt/loop_descriptor.h
++++ b/source/opt/loop_descriptor.h
+@@ -38,7 +38,7 @@ class CFG;
+ class LoopDescriptor;
+ 
+ // A class to represent and manipulate a loop in structured control flow.
+-class Loop {
++class SPIRV_TOOLS_OPT_EXPORT Loop {
+   // The type used to represent nested child loops.
+   using ChildrenList = std::vector<Loop*>;
+ 
+@@ -417,7 +417,7 @@ class Loop {
+ // Loop descriptions class for a given function.
+ // For a given function, the class builds loop nests information.
+ // The analysis expects a structured control flow.
+-class LoopDescriptor {
++class SPIRV_TOOLS_OPT_EXPORT LoopDescriptor {
+  public:
+   // Iterator interface (depth first postorder traversal).
+   using iterator = PostOrderTreeDFIterator<Loop>;
+diff --git a/source/opt/module.h b/source/opt/module.h
+index 9cc46a92..f7485e23 100644
+--- a/source/opt/module.h
++++ b/source/opt/module.h
+@@ -43,7 +43,7 @@ struct ModuleHeader {
+ 
+ // A SPIR-V module. It contains all the information for a SPIR-V module and
+ // serves as the backbone of optimization transformations.
+-class Module {
++class SPIRV_TOOLS_OPT_EXPORT Module {
+  public:
+   using iterator = UptrVectorIterator<Function>;
+   using const_iterator = UptrVectorIterator<Function, true>;
+diff --git a/source/opt/optimizer.cpp b/source/opt/optimizer.cpp
+index 8a6d3a97..ff70c8eb 100644
+--- a/source/opt/optimizer.cpp
++++ b/source/opt/optimizer.cpp
+@@ -1230,15 +1230,15 @@ Optimizer::PassToken CreateCanonicalizeIdsPass() {
+ 
+ extern "C" {
+ 
+-SPIRV_TOOLS_EXPORT spv_optimizer_t* spvOptimizerCreate(spv_target_env env) {
++SPIRV_TOOLS_OPT_EXPORT spv_optimizer_t* spvOptimizerCreate(spv_target_env env) {
+   return reinterpret_cast<spv_optimizer_t*>(new spvtools::Optimizer(env));
+ }
+ 
+-SPIRV_TOOLS_EXPORT void spvOptimizerDestroy(spv_optimizer_t* optimizer) {
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerDestroy(spv_optimizer_t* optimizer) {
+   delete reinterpret_cast<spvtools::Optimizer*>(optimizer);
+ }
+ 
+-SPIRV_TOOLS_EXPORT void spvOptimizerSetMessageConsumer(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerSetMessageConsumer(
+     spv_optimizer_t* optimizer, spv_message_consumer consumer) {
+   reinterpret_cast<spvtools::Optimizer*>(optimizer)->
+       SetMessageConsumer(
+@@ -1248,31 +1248,31 @@ SPIRV_TOOLS_EXPORT void spvOptimizerSetMessageConsumer(
+           });
+ }
+ 
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterLegalizationPasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterLegalizationPasses(
+     spv_optimizer_t* optimizer) {
+   reinterpret_cast<spvtools::Optimizer*>(optimizer)->
+       RegisterLegalizationPasses();
+ }
+ 
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterPerformancePasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterPerformancePasses(
+     spv_optimizer_t* optimizer) {
+   reinterpret_cast<spvtools::Optimizer*>(optimizer)->
+       RegisterPerformancePasses();
+ }
+ 
+-SPIRV_TOOLS_EXPORT void spvOptimizerRegisterSizePasses(
++SPIRV_TOOLS_OPT_EXPORT void spvOptimizerRegisterSizePasses(
+     spv_optimizer_t* optimizer) {
+   reinterpret_cast<spvtools::Optimizer*>(optimizer)->RegisterSizePasses();
+ }
+ 
+-SPIRV_TOOLS_EXPORT bool spvOptimizerRegisterPassFromFlag(
++SPIRV_TOOLS_OPT_EXPORT bool spvOptimizerRegisterPassFromFlag(
+     spv_optimizer_t* optimizer, const char* flag)
+ {
+   return reinterpret_cast<spvtools::Optimizer*>(optimizer)->
+       RegisterPassFromFlag(flag);
+ }
+ 
+-SPIRV_TOOLS_EXPORT bool spvOptimizerRegisterPassesFromFlags(
++SPIRV_TOOLS_OPT_EXPORT bool spvOptimizerRegisterPassesFromFlags(
+     spv_optimizer_t* optimizer, const char** flags, const size_t flag_count) {
+   std::vector<std::string> opt_flags =
+       spvtools::GetVectorOfStrings(flags, flag_count);
+@@ -1280,7 +1280,7 @@ SPIRV_TOOLS_EXPORT bool spvOptimizerRegisterPassesFromFlags(
+       ->RegisterPassesFromFlags(opt_flags, false);
+ }
+ 
+-SPIRV_TOOLS_EXPORT bool
++SPIRV_TOOLS_OPT_EXPORT bool
+ spvOptimizerRegisterPassesFromFlagsWhilePreservingTheInterface(
+     spv_optimizer_t* optimizer, const char** flags, const size_t flag_count) {
+   std::vector<std::string> opt_flags =
+@@ -1289,7 +1289,7 @@ spvOptimizerRegisterPassesFromFlagsWhilePreservingTheInterface(
+       ->RegisterPassesFromFlags(opt_flags, true);
+ }
+ 
+-SPIRV_TOOLS_EXPORT
++SPIRV_TOOLS_OPT_EXPORT
+ spv_result_t spvOptimizerRun(spv_optimizer_t* optimizer,
+                              const uint32_t* binary,
+                              const size_t word_count,
+diff --git a/source/opt/pass.h b/source/opt/pass.h
+index 73773e3f..4a9ae2cd 100644
+--- a/source/opt/pass.h
++++ b/source/opt/pass.h
+@@ -41,7 +41,7 @@ namespace opt {
+ 
+ // Abstract class of a pass. All passes should implement this abstract class
+ // and all analysis and transformation is done via the Process() method.
+-class Pass {
++class SPIRV_TOOLS_OPT_EXPORT Pass {
+  public:
+   // The status of processing a module using a pass.
+   //
+diff --git a/source/opt/pass_manager.h b/source/opt/pass_manager.h
+index 11961a33..7060df2a 100644
+--- a/source/opt/pass_manager.h
++++ b/source/opt/pass_manager.h
+@@ -33,7 +33,7 @@ namespace opt {
+ // The pass manager, responsible for tracking and running passes.
+ // Clients should first call AddPass() to add passes and then call Run()
+ // to run on a module. Passes are executed in the exact order of addition.
+-class PassManager {
++class SPIRV_TOOLS_OPT_EXPORT PassManager {
+  public:
+   // Constructs a pass manager.
+   //
+@@ -48,6 +48,11 @@ class PassManager {
+         val_options_(nullptr),
+         validate_after_all_(false) {}
+ 
++  // Not copyable. Declared explicitly because MSVC defines the implicit copy
++  // operations of dllexport'ed classes, which fails for passes_.
++  PassManager(const PassManager&) = delete;
++  PassManager& operator=(const PassManager&) = delete;
++
+   // Sets the message consumer to the given |consumer|.
+   void SetMessageConsumer(MessageConsumer c) { consumer_ = std::move(c); }
+ 
+diff --git a/source/opt/remove_duplicates_pass.h b/source/opt/remove_duplicates_pass.h
+index e5b3925d..1b89e804 100644
+--- a/source/opt/remove_duplicates_pass.h
++++ b/source/opt/remove_duplicates_pass.h
+@@ -31,7 +31,7 @@ using IdDecorationsList =
+     std::unordered_map<uint32_t, std::vector<Instruction*>>;
+ 
+ // See optimizer.hpp for documentation.
+-class RemoveDuplicatesPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT RemoveDuplicatesPass : public Pass {
+  public:
+   const char* name() const override { return "remove-duplicates"; }
+   Status Process() override;
+diff --git a/source/opt/remove_unused_interface_variables_pass.h b/source/opt/remove_unused_interface_variables_pass.h
+index a4cb1085..2eb3731b 100644
+--- a/source/opt/remove_unused_interface_variables_pass.h
++++ b/source/opt/remove_unused_interface_variables_pass.h
+@@ -19,7 +19,7 @@
+ namespace spvtools {
+ namespace opt {
+ 
+-class RemoveUnusedInterfaceVariablesPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT RemoveUnusedInterfaceVariablesPass : public Pass {
+   const char* name() const override {
+     return "remove-unused-interface-variables-pass";
+   }
+diff --git a/source/opt/resolve_binding_conflicts_pass.h b/source/opt/resolve_binding_conflicts_pass.h
+index d1ab433d..cc3a5d18 100644
+--- a/source/opt/resolve_binding_conflicts_pass.h
++++ b/source/opt/resolve_binding_conflicts_pass.h
+@@ -25,7 +25,7 @@
+ 
+ namespace spvtools {
+ namespace opt {
+-class ResolveBindingConflictsPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT ResolveBindingConflictsPass : public Pass {
+  public:
+   virtual ~ResolveBindingConflictsPass() override = default;
+   const char* name() const override { return "resolve-binding-conflicts"; }
+diff --git a/source/opt/split_combined_image_sampler_pass.h b/source/opt/split_combined_image_sampler_pass.h
+index 253f34ab..b9015fd1 100644
+--- a/source/opt/split_combined_image_sampler_pass.h
++++ b/source/opt/split_combined_image_sampler_pass.h
+@@ -32,7 +32,7 @@ namespace opt {
+ // and a sampler variable. Similar for function parameters.
+ //
+ // Copy the descriptor set and binding number. Vulkan allows this, surprisingly.
+-class SplitCombinedImageSamplerPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT SplitCombinedImageSamplerPass : public Pass {
+  public:
+   virtual ~SplitCombinedImageSamplerPass() override = default;
+   const char* name() const override { return "split-combined-image-sampler"; }
+diff --git a/source/opt/strip_debug_info_pass.h b/source/opt/strip_debug_info_pass.h
+index 47a2cd40..ec25d912 100644
+--- a/source/opt/strip_debug_info_pass.h
++++ b/source/opt/strip_debug_info_pass.h
+@@ -23,7 +23,7 @@ namespace spvtools {
+ namespace opt {
+ 
+ // See optimizer.hpp for documentation.
+-class StripDebugInfoPass : public Pass {
++class SPIRV_TOOLS_OPT_EXPORT StripDebugInfoPass : public Pass {
+  public:
+   const char* name() const override { return "strip-debug"; }
+   Status Process() override;
+diff --git a/source/opt/struct_cfg_analysis.h b/source/opt/struct_cfg_analysis.h
+index 0e0ccc9b..a2c21d9a 100644
+--- a/source/opt/struct_cfg_analysis.h
++++ b/source/opt/struct_cfg_analysis.h
+@@ -28,7 +28,7 @@ class IRContext;
+ 
+ // An analysis that, for each basic block, finds the constructs in which it is
+ // contained, so we can easily get headers and merge nodes.
+-class StructuredCFGAnalysis {
++class SPIRV_TOOLS_OPT_EXPORT StructuredCFGAnalysis {
+  public:
+   explicit StructuredCFGAnalysis(IRContext* ctx);
+ 
+diff --git a/source/opt/type_manager.h b/source/opt/type_manager.h
+index cadc7c21..f682d8fd 100644
+--- a/source/opt/type_manager.h
++++ b/source/opt/type_manager.h
+@@ -68,7 +68,7 @@ struct CompareTypeUniquePointers {
+ };
+ 
+ // A class for managing the SPIR-V type hierarchy.
+-class TypeManager {
++class SPIRV_TOOLS_OPT_EXPORT TypeManager {
+  public:
+   using IdToTypeMap = std::unordered_map<uint32_t, Type*>;
+ 
+diff --git a/source/opt/types.h b/source/opt/types.h
+index 90c34479..4732c73e 100644
+--- a/source/opt/types.h
++++ b/source/opt/types.h
+@@ -77,7 +77,7 @@ class BufferEXT;
+ 
+ // Abstract class for a SPIR-V type. It has a bunch of As<sublcass>() methods,
+ // which is used as a way to probe the actual <subclass>.
+-class Type {
++class SPIRV_TOOLS_OPT_EXPORT Type {
+  public:
+   typedef std::set<std::pair<const Pointer*, const Pointer*>> IsSameCache;
+ 
+@@ -269,7 +269,7 @@ protected:
+ };
+ // clang-format on
+ 
+-class Integer : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Integer : public Type {
+  public:
+   Integer(uint32_t w, bool is_signed)
+       : Type(kInteger), width_(w), signed_(is_signed) {}
+@@ -291,7 +291,7 @@ class Integer : public Type {
+   bool signed_;     // true if this integer is signed
+ };
+ 
+-class Float : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Float : public Type {
+  public:
+   Float(uint32_t w, spv::FPEncoding encoding = spv::FPEncoding::Max)
+       : Type(kFloat), width_(w), encoding_(encoding) {}
+@@ -313,7 +313,7 @@ class Float : public Type {
+   spv::FPEncoding encoding_;  // FPEncoding
+ };
+ 
+-class Vector : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Vector : public Type {
+  public:
+   Vector(const Type* element_type, uint32_t count);
+   Vector(const Vector&) = default;
+@@ -334,7 +334,7 @@ class Vector : public Type {
+   uint32_t count_;
+ };
+ 
+-class Matrix : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Matrix : public Type {
+  public:
+   Matrix(const Type* element_type, uint32_t count);
+   Matrix(const Matrix&) = default;
+@@ -355,7 +355,7 @@ class Matrix : public Type {
+   uint32_t count_;
+ };
+ 
+-class Image : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Image : public Type {
+  public:
+   Image(Type* type, spv::Dim dimen, uint32_t d, bool array, bool multisample,
+         uint32_t sampling, spv::ImageFormat f,
+@@ -391,7 +391,7 @@ class Image : public Type {
+   spv::AccessQualifier access_qualifier_;
+ };
+ 
+-class SampledImage : public Type {
++class SPIRV_TOOLS_OPT_EXPORT SampledImage : public Type {
+  public:
+   SampledImage(Type* image) : Type(kSampledImage), image_type_(image) {}
+   SampledImage(const SampledImage&) = default;
+@@ -410,7 +410,7 @@ class SampledImage : public Type {
+   Type* image_type_;
+ };
+ 
+-class Array : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Array : public Type {
+  public:
+   // Data about the length operand, that helps us distinguish between one
+   // array length and another.
+@@ -458,7 +458,7 @@ class Array : public Type {
+   const LengthInfo length_info_;
+ };
+ 
+-class RuntimeArray : public Type {
++class SPIRV_TOOLS_OPT_EXPORT RuntimeArray : public Type {
+  public:
+   RuntimeArray(const Type* element_type);
+   RuntimeArray(const RuntimeArray&) = default;
+@@ -479,7 +479,7 @@ class RuntimeArray : public Type {
+   const Type* element_type_;
+ };
+ 
+-class NodePayloadArrayAMDX : public Type {
++class SPIRV_TOOLS_OPT_EXPORT NodePayloadArrayAMDX : public Type {
+  public:
+   NodePayloadArrayAMDX(const Type* element_type);
+   NodePayloadArrayAMDX(const NodePayloadArrayAMDX&) = default;
+@@ -502,7 +502,7 @@ class NodePayloadArrayAMDX : public Type {
+   const Type* element_type_;
+ };
+ 
+-class Struct : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Struct : public Type {
+  public:
+   Struct(const std::vector<const Type*>& element_types);
+   Struct(const Struct&) = default;
+@@ -547,7 +547,7 @@ class Struct : public Type {
+   std::map<uint32_t, std::vector<std::vector<uint32_t>>> element_decorations_;
+ };
+ 
+-class Opaque : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Opaque : public Type {
+  public:
+   Opaque(std::string n) : Type(kOpaque), name_(std::move(n)) {}
+   Opaque(const Opaque&) = default;
+@@ -567,7 +567,7 @@ class Opaque : public Type {
+   std::string name_;
+ };
+ 
+-class Pointer : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Pointer : public Type {
+  public:
+   Pointer(const Type* pointee, spv::StorageClass sc);
+   Pointer(const Pointer&) = default;
+@@ -592,7 +592,7 @@ class Pointer : public Type {
+   spv::StorageClass storage_class_;
+ };
+ 
+-class Function : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Function : public Type {
+  public:
+   Function(const Type* ret_type, const std::vector<const Type*>& params);
+   Function(const Type* ret_type, std::vector<const Type*>& params);
+@@ -618,7 +618,7 @@ class Function : public Type {
+   std::vector<const Type*> param_types_;
+ };
+ 
+-class Pipe : public Type {
++class SPIRV_TOOLS_OPT_EXPORT Pipe : public Type {
+  public:
+   Pipe(spv::AccessQualifier qualifier)
+       : Type(kPipe), access_qualifier_(qualifier) {}
+@@ -639,7 +639,7 @@ class Pipe : public Type {
+   spv::AccessQualifier access_qualifier_;
+ };
+ 
+-class ForwardPointer : public Type {
++class SPIRV_TOOLS_OPT_EXPORT ForwardPointer : public Type {
+  public:
+   ForwardPointer(uint32_t id, spv::StorageClass sc)
+       : Type(kForwardPointer),
+@@ -668,7 +668,7 @@ class ForwardPointer : public Type {
+   const Pointer* pointer_;
+ };
+ 
+-class CooperativeMatrixNV : public Type {
++class SPIRV_TOOLS_OPT_EXPORT CooperativeMatrixNV : public Type {
+  public:
+   CooperativeMatrixNV(const Type* type, const uint32_t scope,
+                       const uint32_t rows, const uint32_t columns);
+@@ -697,7 +697,7 @@ class CooperativeMatrixNV : public Type {
+   const uint32_t columns_id_;
+ };
+ 
+-class CooperativeMatrixKHR : public Type {
++class SPIRV_TOOLS_OPT_EXPORT CooperativeMatrixKHR : public Type {
+  public:
+   CooperativeMatrixKHR(const Type* type, const uint32_t scope,
+                        const uint32_t rows, const uint32_t columns,
+@@ -729,7 +729,7 @@ class CooperativeMatrixKHR : public Type {
+   const uint32_t use_id_;
+ };
+ 
+-class TensorLayoutNV : public Type {
++class SPIRV_TOOLS_OPT_EXPORT TensorLayoutNV : public Type {
+  public:
+   TensorLayoutNV(const uint32_t dim, const uint32_t clamp_mode);
+   TensorLayoutNV(const TensorLayoutNV&) = default;
+@@ -751,7 +751,7 @@ class TensorLayoutNV : public Type {
+   const uint32_t clamp_mode_id_;
+ };
+ 
+-class TensorViewNV : public Type {
++class SPIRV_TOOLS_OPT_EXPORT TensorViewNV : public Type {
+  public:
+   TensorViewNV(const uint32_t dim, const uint32_t clamp_mode,
+                const std::vector<uint32_t>& perm);
+@@ -776,7 +776,7 @@ class TensorViewNV : public Type {
+   std::vector<uint32_t> perm_;
+ };
+ 
+-class CooperativeVectorNV : public Type {
++class SPIRV_TOOLS_OPT_EXPORT CooperativeVectorNV : public Type {
+  public:
+   CooperativeVectorNV(const Type* type, const uint32_t components);
+   CooperativeVectorNV(const CooperativeVectorNV&) = default;
+@@ -800,7 +800,7 @@ class CooperativeVectorNV : public Type {
+   const uint32_t components_;
+ };
+ 
+-class TensorARM : public Type {
++class SPIRV_TOOLS_OPT_EXPORT TensorARM : public Type {
+  public:
+   TensorARM(const Type* elty, const uint32_t rank = 0,
+             const uint32_t shape = 0);
+@@ -827,7 +827,7 @@ class TensorARM : public Type {
+   const uint32_t shape_id_;
+ };
+ 
+-class GraphARM : public Type {
++class SPIRV_TOOLS_OPT_EXPORT GraphARM : public Type {
+  public:
+   GraphARM(const uint32_t num_inputs, const std::vector<const Type*>& io_types);
+   GraphARM(const GraphARM&) = default;
+@@ -850,7 +850,7 @@ class GraphARM : public Type {
+   const std::vector<const Type*> io_types_;
+ };
+ 
+-class BufferEXT : public Type {
++class SPIRV_TOOLS_OPT_EXPORT BufferEXT : public Type {
+  public:
+   BufferEXT(spv::StorageClass storage_class_);
+   BufferEXT(const BufferEXT&) = default;
+@@ -871,7 +871,7 @@ class BufferEXT : public Type {
+ };
+ 
+ #define DefineParameterlessType(type, name)                                \
+-  class type : public Type {                                               \
++  class SPIRV_TOOLS_OPT_EXPORT type : public Type {                                               \
+    public:                                                                 \
+     type() : Type(k##type) {}                                              \
+     type(const type&) = default;                                           \
+diff --git a/source/print.h b/source/print.h
+index f31ba38e..b8f038a4 100644
+--- a/source/print.h
++++ b/source/print.h
+@@ -18,6 +18,8 @@
+ #include <iostream>
+ #include <sstream>
+ 
++#include "spirv-tools/libspirv.h"
++
+ namespace spvtools {
+ 
+ // Wrapper for out stream selection.
+@@ -39,32 +41,32 @@ class out_stream {
+ 
+ namespace clr {
+ // Resets console color.
+-struct reset {
++struct SPIRV_TOOLS_EXPORT reset {
+   operator const char*();
+   bool isPrint;
+ };
+ // Sets console color to grey.
+-struct grey {
++struct SPIRV_TOOLS_EXPORT grey {
+   operator const char*();
+   bool isPrint;
+ };
+ // Sets console color to red.
+-struct red {
++struct SPIRV_TOOLS_EXPORT red {
+   operator const char*();
+   bool isPrint;
+ };
+ // Sets console color to green.
+-struct green {
++struct SPIRV_TOOLS_EXPORT green {
+   operator const char*();
+   bool isPrint;
+ };
+ // Sets console color to yellow.
+-struct yellow {
++struct SPIRV_TOOLS_EXPORT yellow {
+   operator const char*();
+   bool isPrint;
+ };
+ // Sets console color to blue.
+-struct blue {
++struct SPIRV_TOOLS_EXPORT blue {
+   operator const char*();
+   bool isPrint;
+ };
+diff --git a/source/reduce/CMakeLists.txt b/source/reduce/CMakeLists.txt
+index b631e9d0..4eb57628 100644
+--- a/source/reduce/CMakeLists.txt
++++ b/source/reduce/CMakeLists.txt
+@@ -80,6 +80,7 @@ spvtools_pch(SPIRV_TOOLS_REDUCE_SOURCES pch_source_reduce)
+ add_library(SPIRV-Tools-reduce ${SPIRV_TOOLS_LIBRARY_TYPE} ${SPIRV_TOOLS_REDUCE_SOURCES})
+ 
+ spvtools_default_compile_options(SPIRV-Tools-reduce)
++spvtools_export_macros(SPIRV-Tools-reduce SPIRV_TOOLS_REDUCE)
+ target_include_directories(SPIRV-Tools-reduce
+   PUBLIC
+ 	$<BUILD_INTERFACE:${spirv-tools_SOURCE_DIR}/include>
+diff --git a/source/reduce/reducer.h b/source/reduce/reducer.h
+index f3ba1806..91afb73c 100644
+--- a/source/reduce/reducer.h
++++ b/source/reduce/reducer.h
+@@ -26,7 +26,7 @@ namespace reduce {
+ 
+ // This class manages the process of applying a reduction -- parameterized by a
+ // number of reduction passes and an interestingness test, to a SPIR-V binary.
+-class Reducer {
++class SPIRV_TOOLS_REDUCE_EXPORT Reducer {
+  public:
+   // Possible statuses that can result from running a reduction.
+   enum ReductionResultStatus {
+diff --git a/source/spirv_target_env.h b/source/spirv_target_env.h
+index 4378f06f..8ad607ab 100644
+--- a/source/spirv_target_env.h
++++ b/source/spirv_target_env.h
+@@ -22,23 +22,23 @@
+ #include "spirv-tools/libspirv.h"
+ 
+ // Returns true if |env| is a VULKAN environment, false otherwise.
+-bool spvIsVulkanEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT bool spvIsVulkanEnv(spv_target_env env);
+ 
+ // Returns true if |env| is an OPENCL environment, false otherwise.
+-bool spvIsOpenCLEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT bool spvIsOpenCLEnv(spv_target_env env);
+ 
+ // Returns true if |env| is an OPENGL environment, false otherwise.
+-bool spvIsOpenGLEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT bool spvIsOpenGLEnv(spv_target_env env);
+ 
+ // Returns true if |env| is an implemented/valid environment, false otherwise.
+-bool spvIsValidEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT bool spvIsValidEnv(spv_target_env env);
+ 
+ // Returns the version number for the given SPIR-V target environment.
+-uint32_t spvVersionForTargetEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT uint32_t spvVersionForTargetEnv(spv_target_env env);
+ 
+ // Returns a string to use in logging messages that indicates the class of
+ // environment, i.e. "Vulkan", "OpenCL", etc.
+-std::string spvLogStringForEnv(spv_target_env env);
++SPIRV_TOOLS_EXPORT std::string spvLogStringForEnv(spv_target_env env);
+ 
+ // Returns a formatted list of all SPIR-V target environment names that
+ // can be parsed by spvParseTargetEnv.
+@@ -46,11 +46,11 @@ std::string spvLogStringForEnv(spv_target_env env);
+ //       except the first one will be padded with.
+ // |wrap| is the max length of lines the user desires. Word-wrapping will
+ //        occur to satisfy this limit.
+-std::string spvTargetEnvList(const int pad, const int wrap);
++SPIRV_TOOLS_EXPORT std::string spvTargetEnvList(const int pad, const int wrap);
+ 
+ // Reads the target environment from the header comments of disassembly. Returns
+ // true if valid name found, false otherwise.
+-bool spvReadEnvironmentFromText(const std::vector<char>& text,
++SPIRV_TOOLS_EXPORT bool spvReadEnvironmentFromText(const std::vector<char>& text,
+                                 spv_target_env* env);
+ 
+ #endif  // SOURCE_SPIRV_TARGET_ENV_H_
+diff --git a/source/spirv_validator_options.h b/source/spirv_validator_options.h
+index 131d80dd..ee9760d5 100644
+--- a/source/spirv_validator_options.h
++++ b/source/spirv_validator_options.h
+@@ -19,7 +19,7 @@
+ 
+ // Return true if the command line option for the validator limit is valid (Also
+ // returns the Enum for option in this case). Returns false otherwise.
+-bool spvParseUniversalLimitsOptions(const char* s, spv_validator_limit* limit);
++SPIRV_TOOLS_EXPORT bool spvParseUniversalLimitsOptions(const char* s, spv_validator_limit* limit);
+ 
+ // Default initialization of this structure is to the default Universal Limits
+ // described in the SPIR-V Spec.
+diff --git a/source/table.h b/source/table.h
+index e61a4d49..02a88c2c 100644
+--- a/source/table.h
++++ b/source/table.h
+@@ -32,7 +32,7 @@ namespace spvtools {
+ 
+ // Sets the message consumer to |consumer| in the given |context|. The original
+ // message consumer will be overwritten.
+-void SetContextMessageConsumer(spv_context context, MessageConsumer consumer);
++SPIRV_TOOLS_EXPORT void SetContextMessageConsumer(spv_context context, MessageConsumer consumer);
+ }  // namespace spvtools
+ 
+ #endif  // SOURCE_TABLE_H_
+diff --git a/source/table2.h b/source/table2.h
+index 1218fb26..c3424560 100644
+--- a/source/table2.h
++++ b/source/table2.h
+@@ -93,7 +93,7 @@ namespace spvtools {
+ using IndexRange = utils::IndexRange<uint32_t, uint32_t>;
+ 
+ // Describes a SPIR-V operand.
+-struct OperandDesc {
++struct SPIRV_TOOLS_EXPORT OperandDesc {
+   const uint32_t value;
+ 
+   const IndexRange operands_range;      // Indexes kOperandSpans
+@@ -134,7 +134,7 @@ struct OperandDesc {
+ };
+ 
+ // Describes an Instruction
+-struct InstructionDesc {
++struct SPIRV_TOOLS_EXPORT InstructionDesc {
+   const spv::Op opcode;
+   const bool hasResult = false;
+   const bool hasType = false;
+@@ -187,7 +187,7 @@ struct InstructionDesc {
+ };
+ 
+ // Describes an extended instruction
+-struct ExtInstDesc {
++struct SPIRV_TOOLS_EXPORT ExtInstDesc {
+   const uint32_t value;
+   const IndexRange operands_range;      // Indexes kOperandSpans
+   const IndexRange name_range;          // Indexes kStrings
+@@ -209,10 +209,10 @@ struct ExtInstDesc {
+ 
+ // Finds the instruction description by opcode name. The name should not
+ // have the "Op" prefix. On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupOpcode(const char* name, const InstructionDesc** desc);
++SPIRV_TOOLS_EXPORT spv_result_t LookupOpcode(const char* name, const InstructionDesc** desc);
+ // Finds the instruction description by opcode value.
+ // On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupOpcode(spv::Op opcode, const InstructionDesc** desc);
++SPIRV_TOOLS_EXPORT spv_result_t LookupOpcode(spv::Op opcode, const InstructionDesc** desc);
+ 
+ // Finds the instruction description by opcode name, without the "Op" prefix.
+ // A lookup will succeed if:
+@@ -222,7 +222,7 @@ spv_result_t LookupOpcode(spv::Op opcode, const InstructionDesc** desc);
+ //   or the instruction is enabled by at least one extension,
+ //   or the instruction is enabled by at least one capability.,
+ // On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupOpcodeForEnv(spv_target_env env, const char* name,
++SPIRV_TOOLS_EXPORT spv_result_t LookupOpcodeForEnv(spv_target_env env, const char* name,
+                                 const InstructionDesc** desc);
+ 
+ // Finds the instruction description by opcode value.
+@@ -233,31 +233,31 @@ spv_result_t LookupOpcodeForEnv(spv_target_env env, const char* name,
+ //   or the instruction is enabled by at least one extension,
+ //   or the instruction is enabled by at least one capability.,
+ // On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupOpcodeForEnv(spv_target_env env, spv::Op,
++SPIRV_TOOLS_EXPORT spv_result_t LookupOpcodeForEnv(spv_target_env env, spv::Op,
+                                 const InstructionDesc** desc);
+ 
+-spv_result_t LookupOperand(spv_operand_type_t type, const char* name,
++SPIRV_TOOLS_EXPORT spv_result_t LookupOperand(spv_operand_type_t type, const char* name,
+                            size_t name_len, const OperandDesc** desc);
+-spv_result_t LookupOperand(spv_operand_type_t type, uint32_t operand,
++SPIRV_TOOLS_EXPORT spv_result_t LookupOperand(spv_operand_type_t type, uint32_t operand,
+                            const OperandDesc** desc);
+ 
+ // Finds the extended instruction description by opcode name.
+ // On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupExtInst(spv_ext_inst_type_t type, const char* name,
++SPIRV_TOOLS_EXPORT spv_result_t LookupExtInst(spv_ext_inst_type_t type, const char* name,
+                            const ExtInstDesc** desc);
+ // Finds the extended instruction description by opcode value.
+ // On success, returns SPV_SUCCESS and updates *desc.
+-spv_result_t LookupExtInst(spv_ext_inst_type_t type, uint32_t value,
++SPIRV_TOOLS_EXPORT spv_result_t LookupExtInst(spv_ext_inst_type_t type, uint32_t value,
+                            const ExtInstDesc** desc);
+ 
+ // Finds Extension enum corresponding to |str|. Returns false if not found.
+-bool GetExtensionFromString(const char* str, Extension* extension);
++SPIRV_TOOLS_EXPORT bool GetExtensionFromString(const char* str, Extension* extension);
+ 
+ // Returns text string corresponding to |extension|.
+-const char* ExtensionToString(Extension extension);
++SPIRV_TOOLS_EXPORT const char* ExtensionToString(Extension extension);
+ 
+ /// Used to provide better error message
+-const char* StorageClassToString(spv::StorageClass value);
++SPIRV_TOOLS_EXPORT const char* StorageClassToString(spv::StorageClass value);
+ 
+ }  // namespace spvtools
+ #endif  // SOURCE_TABLE2_H_
+diff --git a/source/util/bit_vector.h b/source/util/bit_vector.h
+index 3ec9be72..38286e6b 100644
+--- a/source/util/bit_vector.h
++++ b/source/util/bit_vector.h
+@@ -19,13 +19,15 @@
+ #include <iosfwd>
+ #include <vector>
+ 
++#include "spirv-tools/libspirv.h"
++
+ namespace spvtools {
+ namespace utils {
+ 
+ // Implements a bit vector class.
+ //
+ // All bits default to zero, and the upper bound is 2^32-1.
+-class BitVector {
++class SPIRV_TOOLS_EXPORT BitVector {
+  private:
+   using BitContainer = uint64_t;
+   enum { kBitContainerSize = 64 };
+diff --git a/source/util/ilist_node.h b/source/util/ilist_node.h
+index 0579534b..3e5d35cb 100644
+--- a/source/util/ilist_node.h
++++ b/source/util/ilist_node.h
+@@ -134,10 +134,10 @@ inline IntrusiveNodeBase<NodeType>::IntrusiveNodeBase(IntrusiveNodeBase&& that)
+       previous_node_(nullptr),
+       is_sentinel_(that.is_sentinel_) {
+   if (is_sentinel_) {
+-    next_node_ = this;
+-    previous_node_ = this;
++    next_node_ = static_cast<NodeType*>(this);
++    previous_node_ = static_cast<NodeType*>(this);
+   }
+-  that.ReplaceWith(this);
++  that.ReplaceWith(static_cast<NodeType*>(this));
+ }
+ 
+ template <class NodeType>
+@@ -148,7 +148,7 @@ IntrusiveNodeBase<NodeType>::~IntrusiveNodeBase() {
+ template <class NodeType>
+ IntrusiveNodeBase<NodeType>& IntrusiveNodeBase<NodeType>::operator=(
+     IntrusiveNodeBase&& that) {
+-  that.ReplaceWith(this);
++  that.ReplaceWith(static_cast<NodeType*>(this));
+   return *this;
+ }
+ 
+diff --git a/source/util/parse_number.h b/source/util/parse_number.h
+index c5fd2efe..e2682542 100644
+--- a/source/util/parse_number.h
++++ b/source/util/parse_number.h
+@@ -237,7 +237,7 @@ enum class EncodeNumberStatus {
+ // a nullptr, it will be overwritten with error messages in case of failure. In
+ // case of success, |error_msg| will not be touched. Integers up to 64 bits are
+ // supported.
+-EncodeNumberStatus ParseAndEncodeIntegerNumber(
++SPIRV_TOOLS_EXPORT EncodeNumberStatus ParseAndEncodeIntegerNumber(
+     const char* text, const NumberType& type,
+     std::function<void(uint32_t)> emit, std::string* error_msg);
+ 
+@@ -250,7 +250,7 @@ EncodeNumberStatus ParseAndEncodeIntegerNumber(
+ // a nullptr, it will be overwritten with error messages in case of failure. In
+ // case of success, |error_msg| will not be touched. Only 16, 32 and 64 bit
+ // floating point numbers are supported.
+-EncodeNumberStatus ParseAndEncodeFloatingPointNumber(
++SPIRV_TOOLS_EXPORT EncodeNumberStatus ParseAndEncodeFloatingPointNumber(
+     const char* text, const NumberType& type,
+     std::function<void(uint32_t)> emit, std::string* error_msg);
+ 
+@@ -263,7 +263,7 @@ EncodeNumberStatus ParseAndEncodeFloatingPointNumber(
+ // a nullptr, it will be overwritten with error messages in case of failure. In
+ // case of success, |error_msg| will not be touched. Integers up to 64 bits
+ // and 16/32/64 bit floating point values are supported.
+-EncodeNumberStatus ParseAndEncodeNumber(const char* text,
++SPIRV_TOOLS_EXPORT EncodeNumberStatus ParseAndEncodeNumber(const char* text,
+                                         const NumberType& type,
+                                         std::function<void(uint32_t)> emit,
+                                         std::string* error_msg);
+diff --git a/source/util/string_utils.h b/source/util/string_utils.h
+index 590f8cf4..31913765 100644
+--- a/source/util/string_utils.h
++++ b/source/util/string_utils.h
+@@ -23,6 +23,8 @@
+ #include <string>
+ #include <vector>
+ 
++#include "spirv-tools/libspirv.h"
++
+ namespace spvtools {
+ namespace utils {
+ 
+@@ -38,12 +40,12 @@ std::string ToString(T val) {
+ }
+ 
+ // Converts cardinal number to ordinal number string.
+-std::string CardinalToOrdinal(size_t cardinal);
++SPIRV_TOOLS_EXPORT std::string CardinalToOrdinal(size_t cardinal);
+ 
+ // Splits the string |flag|, of the form '--pass_name[=pass_args]' into two
+ // strings "pass_name" and "pass_args".  If |flag| has no arguments, the second
+ // string will be empty.
+-std::pair<std::string, std::string> SplitFlagArgs(const std::string& flag);
++SPIRV_TOOLS_EXPORT std::pair<std::string, std::string> SplitFlagArgs(const std::string& flag);
+ 
+ // Encodes a string as a sequence of words, using the SPIR-V encoding, appending
+ // to an existing vector.
+diff --git a/source/util/timer.h b/source/util/timer.h
+index e9a3a599..4b3ae475 100644
+--- a/source/util/timer.h
++++ b/source/util/timer.h
+@@ -23,6 +23,8 @@
+ #include <cassert>
+ #include <iostream>
+ 
++#include "spirv-tools/libspirv.h"
++
+ #if defined(__GNUG__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Warray-bounds"
+@@ -66,7 +68,7 @@ namespace utils {
+ // related to memory. Its default is false. In usual, this must be placed before
+ // calling Timer::Report() to inform what those fields printed by
+ // Timer::Report() indicate.
+-void PrintTimerDescription(std::ostream*, bool = false);
++SPIRV_TOOLS_EXPORT void PrintTimerDescription(std::ostream*, bool = false);
+ 
+ // Status of Timer. kGetrusageFailed means it failed in calling getrusage().
+ // kClockGettimeWalltimeFailed means it failed in getting wall time when calling
+@@ -96,7 +98,7 @@ enum UsageStatus {
+ //                               |usage_after_|
+ //   timer.Report(tag);   // <-- print tag and the resource utilization to
+ //                               std::cout.
+-class Timer {
++class SPIRV_TOOLS_EXPORT Timer {
+  public:
+   Timer(std::ostream* out, bool measure_mem_usage = false)
+       : report_stream_(out),
+@@ -296,7 +298,7 @@ class ScopedTimer {
+ //   ctimer->Report(tag);
+ //   delete ctimer;
+ //
+-class CumulativeTimer : public Timer {
++class SPIRV_TOOLS_EXPORT CumulativeTimer : public Timer {
+  public:
+   CumulativeTimer(std::ostream* out, bool measure_mem_usage = false)
+       : Timer(out, measure_mem_usage),
