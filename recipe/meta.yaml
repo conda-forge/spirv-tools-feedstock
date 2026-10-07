@@ -1,6 +1,6 @@
 {% set version = "2026.4" %}
 # The SPIRV-Headers revision pinned by v{{ version }}'s DEPS.
-{% set headers_version = "1.4.357.0" %}
+{% set headers_version = "1.4.363.0" %}
 
 package:
   name: spirv-tools
