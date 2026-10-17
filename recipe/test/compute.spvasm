@@ -1,0 +1,12 @@
+; A minimal valid compute shader, used to run spirv-opt on every platform.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpName %main "main"
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd
