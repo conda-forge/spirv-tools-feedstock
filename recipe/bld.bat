@@ -14,5 +14,3 @@ if %ERRORLEVEL% neq 0 exit 1
 
 ninja -j%CPU_COUNT%
 if %ERRORLEVEL% neq 0 exit 1
-ninja install
-if %ERRORLEVEL% neq 0 exit 1

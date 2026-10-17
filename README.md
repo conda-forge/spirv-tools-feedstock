@@ -61,6 +61,7 @@ Current release info
 | Name | Downloads | Version | Platforms |
 | --- | --- | --- | --- |
 | [![Conda Recipe](https://img.shields.io/badge/recipe-spirv--tools-green.svg)](https://anaconda.org/conda-forge/spirv-tools) | [![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/spirv-tools.svg)](https://anaconda.org/conda-forge/spirv-tools) | [![Conda Version](https://img.shields.io/conda/vn/conda-forge/spirv-tools.svg)](https://anaconda.org/conda-forge/spirv-tools) | [![Conda Platforms](https://img.shields.io/conda/pn/conda-forge/spirv-tools.svg)](https://anaconda.org/conda-forge/spirv-tools) |
+| [![Conda Recipe](https://img.shields.io/badge/recipe-spirv--tools--internal-green.svg)](https://anaconda.org/conda-forge/spirv-tools-internal) | [![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/spirv-tools-internal.svg)](https://anaconda.org/conda-forge/spirv-tools-internal) | [![Conda Version](https://img.shields.io/conda/vn/conda-forge/spirv-tools-internal.svg)](https://anaconda.org/conda-forge/spirv-tools-internal) | [![Conda Platforms](https://img.shields.io/conda/pn/conda-forge/spirv-tools-internal.svg)](https://anaconda.org/conda-forge/spirv-tools-internal) |
 
 Installing spirv-tools
 ======================
@@ -79,7 +80,7 @@ How to use
 <summary>With conda</summary>
 
 ```
-conda install spirv-tools
+conda install spirv-tools spirv-tools-internal
 ```
 
 </details>
@@ -88,7 +89,7 @@ conda install spirv-tools
 <summary>With mamba</summary>
 
 ```
-mamba install spirv-tools
+mamba install spirv-tools spirv-tools-internal
 ```
 
 </details>
@@ -98,9 +99,9 @@ mamba install spirv-tools
 
 ```
 # for adding to your local project
-pixi add spirv-tools
+pixi add spirv-tools spirv-tools-internal
 # for installing globally
-pixi global install spirv-tools
+pixi global install spirv-tools spirv-tools-internal
 ```
 
 </details>
